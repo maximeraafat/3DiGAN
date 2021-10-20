@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 
 ATTRIBUTES = ['body', 'body_texture', 'face', 'face_texture', 'gaze', 'gaze_texture', 'cloth', 'hand']
-SUBJECT_IDS = range(1, 617)  # all subjects by default
+SUBJECT_IDS = range(1, 618)  # all subjects by default
 MAPS = ['mean', 'median', 'std', 'var']
 POSES = ['00000001'] # default pose
 SAVE_PATH = 'humbi_maps'
@@ -23,8 +23,8 @@ parser.add_argument('--maps', metavar='STR', default=MAPS,
                     type=str, nargs='+', help='list of maps')
 parser.add_argument('--save', metavar='PATH', default=SAVE_PATH, type=str,
                     help='path to which the extracted maps will be stored')
-# parser.add_argument('--gdrive', metavar='PATH', default='', type=str,
-#                     help='path to google drive : will store maps under gdrive/save')
+parser.add_argument('--gdrive', metavar='PATH', default='', type=str,
+                    help='path to google drive (if running on colab): will store maps under gdrive/save')
 
 args = parser.parse_args()
 
@@ -139,7 +139,7 @@ def remove_subject(attribute, subject, target_dir = os.getcwd()):
 
 
 
-save_path = args.save # os.path.join(args.gdrive, args.save)
+save_path = os.path.join(args.gdrive, args.save)
 print('Subjects data will be downloaded to :', save_path)
 download_humbi_maps(attributes = args.attributes, subject_ids = args.subjects,
                     maps = args.maps, save_path = save_path)

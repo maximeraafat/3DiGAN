@@ -2,3 +2,4 @@ humbi_maps/
 generated_maps/
 .ipynb_checkpoints/
 .DS_Store
+smpl_bodies/*.npz
