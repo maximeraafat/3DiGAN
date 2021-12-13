@@ -1,6 +1,7 @@
+smplx/
 humbi_maps/
 generated_maps/
 .ipynb_checkpoints/
+__pycache__/
 .DS_Store
-smpl_bodies/*.npz
 subject_*
