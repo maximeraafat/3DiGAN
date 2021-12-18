@@ -8,7 +8,7 @@ import torch
 import smplx
 import numpy as np
 
-from pytorch3d.structures import Meshes, Pointclouds
+from pytorch3d.structures import Meshes
 from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.transforms import axis_angle_to_matrix
 from pytorch3d.loss import chamfer_distance
@@ -34,7 +34,7 @@ def extract_smpl_param(subject:int, pose:str, device:torch.device=device):
     return scale, transl, global_orient, body_pose_smplx
 
 
-### Initialize smplx parameters + displacements given an smplx.SMPLXLayer object
+### Initialize smplx parameters given an smplx.SMPLXLayer object
 def get_init_smplx(smplx_model, requires_grad=True, device:torch.device=device):
     global_orient = torch.nn.Parameter( torch.Tensor([[0, 0, 0]]).to(device), requires_grad=requires_grad )
     transl = torch.nn.Parameter( torch.Tensor([[0, 0, 0]]).to(device), requires_grad=requires_grad )
@@ -88,7 +88,7 @@ def optimization_loop(smpl_mesh, smplx_model, global_orient, transl, body_pose, 
         loss = loss_forward + loss_backward
 
         opt.zero_grad()
-        loop.set_description('total_loss = %.6f' % loss)
+        loop.set_description('total loss = %.6f' % loss)
         loss.backward()
         opt.step()
         sched.step(loss)

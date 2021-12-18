@@ -9,11 +9,11 @@ def plot_structure(structures:List[ Union[Meshes, Pointclouds] ]):
     assert(bool(structures) != None), 'nothing to be plotted'
 
     if not isinstance(structures, list):
-        structures_clone = [structures.cpu().clone()]
+        structures_clone = [structures.clone().cpu()]
     else:
         structures_clone = []
         for structure in structures:
-            structures_clone.append(structure.cpu().clone())
+            structures_clone.append(structure.clone().cpu())
 
     end = len(structures_clone)
     offsets = torch.arange(0, end, step=1)
