@@ -12,7 +12,7 @@ from torchvision.io import read_image
 
 from utils.smpl_to_smplx import smpl2smplx
 from utils.camera_calibration import get_camera_parameters
-from utils.get_renderers import get_renderers
+from utils.renderers import get_renderers
 from utils.pointrend_segmentation import get_pointrend_segmentation
 
 from pytorch3d.io import load_obj
@@ -73,54 +73,44 @@ def neural_renderer(smplx_model, subject:int, poses:List[str], iterations:int, s
     texture_path = textures_path + 'median_subject_%d.png' % subject
     texture = read_image(texture_path)
     texture = torch.moveaxis(texture, 0, 2).unsqueeze(0).to(device).float() * 1.0/255
+    texture = torch.nn.Parameter(texture, requires_grad=True)
 
     img_size = (1080, 1920) # photo resolution
     render_res = ( int(1080/rescale_factor), int(1920/rescale_factor) ) # render resolution
 
-    betas_list = []
-    scale_list = []
-    verts_disps_list = []
+    l1_loss = torch.nn.L1Loss()
+    mse_loss = torch.nn.MSELoss()
+
+    geometry_list = []
     texture_list = []
     total_losses = []
 
-    for pose in poses:
-        print('fit parameters for pose %d out of %d\n' % (i+1, len(poses)) )
-        print('fit new smplx model to provided humbi smpl parameters\n')
+    for i, pose in enumerate(poses):
+        print('fit parameters for pose %d out of %d' % (i+1, len(poses)) )
+        print('fit new smplx model to provided humbi smpl parameters')
         global_orient, transl, body_pose, betas, scale, pose_loss, shape_loss = smpl2smplx(smplx_model, subject, pose, pose_iterations=200, shape_iterations=100)
         left_hand_pose, right_hand_pose, jaw_pose, expression = get_init_mesh(smplx_model)[3:7]
         verts_disps = get_init_mesh(smplx_model)[-1]
 
-        opt_smplx = torch.optim.Adam([global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale], lr=1.0e-3)
-        opt_geom = torch.optim.Adam([body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, verts_disps], lr=1.0e-3)
-        opt_txt = torch.optim.Adam([texture], lr=1.0e-2)
+        opt_geom = torch.optim.Adam([body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, verts_disps], lr=0.001)
+        opt_txt = torch.optim.Adam([texture], lr=0.01)
 
-        sched_smplx = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_smplx, patience=10, verbose=True)
-        sched_geom = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_geom, patience=10, verbose=True)
-        sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=10, verbose=True)
+        sched_geom = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_geom, patience=20, verbose=True)
+        sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=20, verbose=True)
 
-        l1_loss = torch.nn.L1Loss()
-        mse_loss = torch.nn.MSELoss()
-
-        pbar = tqdm(total = iterations * 107)
-        for i in range(iterations):
+        loop = tqdm(total = iterations * 107)
+        for j in range(iterations):
             total_loss = 0
-
             for camera_idx in np.random.choice(107, 107, replace=False):
-                # Construct mesh
-                texture_uv = TexturesUV(maps=texture, faces_uvs=faces_uvs, verts_uvs=verts_uvs)
-                mesh = construct_textured_mesh(smplx_model, texture_uv, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps)
+                try:
+                    # Extract camera parameters
+                    R, T, f, p = get_camera_parameters(subject, camera_idx)
+                except:
+                    print('camera with index %d does not exist' % camera_idx)
+                    continue
 
-                # Extract camera parameters and construct camera
-                R, T, f, p = get_camera_parameters(subject, camera_idx)
+                # Construct camera
                 cameras = PerspectiveCameras(focal_length=-f, principal_point=p, R=R, T=T, in_ndc=False, image_size=(img_size,), device=device)
-
-                # Render mesh from camera viewpoint
-                silhouette_renderer, phong_renderer = get_renderers(cameras, render_res, device=device)
-                phong_render = phong_renderer(mesh).detach()
-                silhouette_render = silhouette_renderer(mesh).detach()
-
-                rgb_render = phong_render[0, ..., :3]
-                silh_render = silhouette_render[0, ..., 3]
 
                 # Segment person in photo from camera viewpoint
                 photo_path = 'subject_%s/body/%s/image/image%s.jpg' % (subject, pose, str(camera_idx).zfill(7))
@@ -130,26 +120,41 @@ def neural_renderer(smplx_model, subject:int, poses:List[str], iterations:int, s
                 silh_photo = silh_photo[0, ::rescale_factor, ::rescale_factor].float().to(device)
                 rgb_photo = rgb_photo[0, ::rescale_factor, ::rescale_factor].to(device)
 
-                # Penalize difference between render and image segmentation
-                loss = l1_loss(rgb_photo, rgb_render) + l1_loss(silh_photo, silh_render) + mse_loss(rgb_photo, rgb_render) + mse_loss(silh_photo, silh_render) + 0.01*torch.norm(verts_disps)
+                # Construct mesh
+                texture_uv = TexturesUV(maps=texture, faces_uvs=faces_uvs, verts_uvs=verts_uvs)
+                mesh = construct_textured_mesh(smplx_model, texture_uv, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps)
+
+                # Render mesh from camera viewpoint
+                silhouette_renderer, phong_renderer = get_renderers(cameras, render_res, device=device)
+                phong_render = phong_renderer(mesh)
+                silhouette_render = silhouette_renderer(mesh)
+
+                rgb_render = phong_render[0, ..., :3]
+                silh_render = silhouette_render[0, ..., 3]
+
+                # Compute loss
+                loss = l1_loss(rgb_photo, rgb_render) + l1_loss(silh_photo, silh_render)
+                loss += mse_loss(rgb_photo, rgb_render) + mse_loss(silh_photo, silh_render)
+                loss += 0.01 * torch.linalg.norm(verts_disps)
                 total_loss += float(loss)
 
+                # Backpropagate loss
                 opt_geom.zero_grad()
                 opt_txt.zero_grad()
-                pbar.set_description('loss = %.6f' % loss)
+                loop.set_description('neural rendering loss = %.6f' % loss)
                 loss.backward()
                 opt_txt.step()
                 opt_geom.step()
-                pbar.update(1)
+                loop.update(1)
 
-            print('total loss = %.6f for pose %s\n' % (total_loss, pose))
             sched_geom.step(total_loss)
             sched_txt.step(total_loss)
 
-        betas_list.append(betas)
-        scale_list.append(scale)
-        verts_disps_list.append(verts_disps)
+        geometry = global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps
+
+        geometry_list.append(geometry)
         texture_list.append(texture)
         total_losses.append(total_loss)
+        print()
 
-    return betas_list, scale_list, verts_disps_list, texture_list, total_losses
+    return geometry_list, texture_list, total_losses

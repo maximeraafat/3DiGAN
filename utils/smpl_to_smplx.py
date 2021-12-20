@@ -29,7 +29,7 @@ def extract_smpl_param(subject:int, pose:str, device:torch.device=device):
     global_orient = torch.Tensor(smpl_param[4:7]).unsqueeze(0).to(device) # smpl and smplx compatible (no perfect match)
     # body_pose = torch.Tensor(smpl_param[7:76]).reshape(1, 23, 3).to(device) # only smpl compatible
     body_pose_smplx = torch.Tensor(smpl_param[7:70]).reshape(1, 21, 3).to(device) # smplx compatible (no perfect match)
-    # betas = torch.Tensor([smpl_param[76:]]).to(device) # only smpl compatible
+    # betas = torch.Tensor(smpl_param[76:]).unsqueeze(0).to(device) # only smpl compatible
 
     return scale, transl, global_orient, body_pose_smplx
 
@@ -51,10 +51,10 @@ def humbi_smpl_mesh(subject:int, pose:str, device:torch.device=device):
     smpl_faces_path = 'subject_%d/body/smpl_mesh.txt' % subject
 
     smpl_verts = np.loadtxt(smpl_verts_path)
-    smpl_verts = torch.Tensor([smpl_verts]).to(device)
+    smpl_verts = torch.Tensor(smpl_verts).unsqueeze(0).to(device)
 
     smpl_faces = np.loadtxt(smpl_faces_path)
-    smpl_faces = torch.Tensor([smpl_faces]).to(device)
+    smpl_faces = torch.Tensor(smpl_faces).unsqueeze(0).to(device)
 
     smpl_mesh = Meshes(smpl_verts, smpl_faces)
 
@@ -88,7 +88,7 @@ def optimization_loop(smpl_mesh, smplx_model, global_orient, transl, body_pose, 
         loss = loss_forward + loss_backward
 
         opt.zero_grad()
-        loop.set_description('total loss = %.6f' % loss)
+        loop.set_description('smpl2smplx loss = %.6f' % loss)
         loss.backward()
         opt.step()
         sched.step(loss)
