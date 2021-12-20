@@ -26,7 +26,7 @@ def extract_smpl_param(subject:int, pose:str, device:torch.device=device):
 
     scale = torch.Tensor([smpl_param[0]]).to(device) # smpl and smplx compatible
     transl = torch.Tensor(smpl_param[1:4]).to(device) # smpl and smplx compatible (no perfect match)
-    global_orient = torch.Tensor([smpl_param[4:7]]).to(device) # smpl and smplx compatible (no perfect match)
+    global_orient = torch.Tensor(smpl_param[4:7]).unsqueeze(0).to(device) # smpl and smplx compatible (no perfect match)
     # body_pose = torch.Tensor(smpl_param[7:76]).reshape(1, 23, 3).to(device) # only smpl compatible
     body_pose_smplx = torch.Tensor(smpl_param[7:70]).reshape(1, 21, 3).to(device) # smplx compatible (no perfect match)
     # betas = torch.Tensor([smpl_param[76:]]).to(device) # only smpl compatible
@@ -117,7 +117,7 @@ def smpl2smplx(smplx_model, subject:int, pose:str, pose_iterations:int=200, shap
     pose_opt_output = optimization_loop(smpl_mesh, smplx_model, global_orient, transl, body_pose, betas, scale, pose_optimizer, pose_scheduler, pose_iterations)
     global_orient, transl, body_pose, betas, scale, pose_loss = pose_opt_output
 
-    print('fit shape parameters first for subject %d and pose %s' % (subject, pose))
+    print('then fit shape parameters for subject %d and pose %s' % (subject, pose))
     shape_opt_output = optimization_loop(smpl_mesh, smplx_model, global_orient, transl, body_pose, betas, scale, shape_optimizer, shape_scheduler, shape_iterations)
     global_orient, transl, body_pose, betas, scale, shape_loss = shape_opt_output
 

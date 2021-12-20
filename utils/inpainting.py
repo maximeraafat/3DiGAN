@@ -33,7 +33,7 @@ def verts_uvs_positions(smplx_uv_path:str, map_size:int=1024):
 
 
 ### Create displacement map for each vertex and perform interpolation (inpaining) between vertex values
-def inpaint_disps(subject:int, displacements:torch.Tensor, smplx_uv_path:str, path_to_textures:str, mask_disps:bool=False):
+def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str, path_to_textures:str, mask_disps:bool=False):
     texture = read_image(path_to_textures + 'median_subject_%d.png' % subject)
     texture = torch.moveaxis(texture, 0, 2).to(device)
     map_size = texture.shape[:2]

@@ -15,10 +15,11 @@ from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.transforms import axis_angle_to_matrix
 from pytorch3d.loss import chamfer_distance
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 if torch.cuda.is_available():
     from chamferdist import ChamferDistance
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 ### Construct pointcloud
 def construct_pointcloud(subject:int, pose:str, normalize:bool=False, device:torch.device=device):
@@ -136,7 +137,7 @@ def optimization_loop(smplx_model, pcl:Pointclouds, iters:int, opt, sched, globa
             '''
 
         opt.zero_grad()
-        loop.set_description('total_loss = %.6f' % loss)
+        loop.set_description('total loss = %.6f' % loss)
         loss.backward()
         opt.step()
         sched.step(loss)

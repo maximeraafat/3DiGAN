@@ -46,8 +46,8 @@ def get_renderers(cameras, image_size=(360, 640), silh_sigma=1e-7, silh_gamma=1e
     )
 
     blend_params = BlendParams(background_color=(1., 1., 1.))
-    # lights = PointLights(device=device, location=((1., 1., -5.),))
-    lights = AmbientLights(device=device)
+    lights = PointLights(device=device, location=((1., 1., -5.),))
+    # lights = AmbientLights(device=device)
 
     phong_renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
