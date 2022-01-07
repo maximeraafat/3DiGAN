@@ -38,13 +38,14 @@ def get_init_mesh(smplx_model, subd, requires_grad=True, device:torch.device=dev
     betas = torch.nn.Parameter( torch.zeros([1, 10]).to(device), requires_grad=requires_grad )
     scale = torch.nn.Parameter( torch.Tensor([1.0]).to(device), requires_grad=requires_grad )
 
-    num_smplx_verts = smplx_model.get_num_verts() # 10475 vertices for no subdivision
-    verts_disps = torch.nn.Parameter( torch.zeros([num_smplx_verts, 1]).to(device), requires_grad=requires_grad )
-
     if subd: # number of vertices for 1 subdivision = 41853
         verts_disps = torch.nn.Parameter( torch.zeros([41853, 1]).to(device), requires_grad=requires_grad )
 
-    texture = torch.nn.Parameter( torch.zeros([1, 2048, 2048, 3]).to(device), requires_grad=requires_grad )
+    else:
+        num_smplx_verts = smplx_model.get_num_verts() # 10475 vertices for no subdivision
+        verts_disps = torch.nn.Parameter( torch.zeros([num_smplx_verts, 1]).to(device), requires_grad=requires_grad )
+
+    texture = torch.nn.Parameter( torch.zeros([1, 1024, 1024, 3]).to(device), requires_grad=requires_grad )
 
     return global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps, texture
 
@@ -116,19 +117,18 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
     global_orient, transl, body_pose, betas, scale, pose_loss, shape_loss = smpl2smplx(smplx_model, subject, pose, pose_iterations=200, shape_iterations=100)
     left_hand_pose, right_hand_pose, jaw_pose, expression = get_init_mesh(smplx_model, subdivision)[3:7]
     verts_disps, texture = get_init_mesh(smplx_model, subdivision)[-2:]
+    init_body_pose = body_pose.detach()
 
-    optimizer = torch.optim.Adam([body_pose, betas, verts_disps, texture], lr=0.01)
-    # opt_pose_shape = torch.optim.Adam([body_pose, betas], lr=0.001)
-    # opt_geom = torch.optim.Adam([verts_disps], lr=0.01)
-    # opt_txt = torch.optim.Adam([texture], lr=0.01)
+    # Seperating parameters in different optimizers helps the learning
+    opt_pose_shape = torch.optim.Adam([body_pose, betas], lr=0.01)
+    opt_geom = torch.optim.Adam([verts_disps], lr=0.001)
+    opt_txt = torch.optim.Adam([texture], lr=0.01)
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, threshold=1, verbose=True)
-    # sched_pose_shape = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_pose_shape, patience=10, threshold=1, verbose=True)
-    # sched_geom = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_geom, patience=5, threshold=1, verbose=True)
-    # sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=10, threshold=1, verbose=True)
+    sched_pose_shape = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_pose_shape, patience=10, threshold=0.1, verbose=True)
+    sched_geom = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_geom, patience=5, threshold=0.1, verbose=True)
+    sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=10, threshold=0.1, verbose=True)
 
     l1_loss = torch.nn.L1Loss()
-    # mse_loss = torch.nn.MSELoss()
 
     print('neural rendering')
     loop = tqdm(total = iterations * len(camera_idx_list))
@@ -156,29 +156,27 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
             silh_render = silhouette_render[0, ..., 3]
 
             # Compute loss
-            loss = 10 * ( l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render) )
-            # loss += 10 * ( mse_loss(rgb_photo_list[k], rgb_render) + mse_loss(silh_photo_list[k], silh_render) )
-            loss += 0.01 * torch.linalg.norm(verts_disps)
+            loss = l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render)
+            loss += 0.001 * torch.linalg.norm(body_pose - init_body_pose)
+            loss += 0.0001 * torch.linalg.norm(verts_disps_output)
+
             total_loss += float(loss)
 
             # Backpropagate loss
-            optimizer.zero_grad()
-            # opt_pose_shape.zero_grad()
-            # opt_geom.zero_grad()
-            # opt_txt.zero_grad()
+            opt_pose_shape.zero_grad()
+            opt_geom.zero_grad()
+            opt_txt.zero_grad()
             loop.set_description('neural rendering loss = %.6f' % loss)
             loss.backward()
-            optimizer.step()
-            # opt_pose_shape.step()
-            # opt_geom.step()
-            # opt_txt.step()
+            opt_pose_shape.step()
+            opt_geom.step()
+            opt_txt.step()
             loop.update(1)
 
         print('neural rendering total loss for iteration %d : %.6f' % ((i+1), total_loss))
-        scheduler.step(total_loss)
-        # sched_pose_shape.step(total_loss)
-        # sched_geom.step(total_loss)
-        # sched_txt.step(total_loss)
+        sched_pose_shape.step(total_loss)
+        sched_geom.step(total_loss)
+        sched_txt.step(total_loss)
 
         if save_path is not None and i%2 == 0 and i > 0:
             os.makedirs(save_path, exist_ok=True)
