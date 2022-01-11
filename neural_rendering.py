@@ -18,13 +18,12 @@ from pytorch3d.io import load_obj, save_obj
 from pytorch3d.structures import Meshes
 from pytorch3d.ops import SubdivideMeshes
 from pytorch3d.transforms import axis_angle_to_matrix
-from pytorch3d.renderer import (
-    PerspectiveCameras,
-    TexturesUV
-)
+from pytorch3d.renderer import PerspectiveCameras, TexturesUV
+from pytorch3d.loss import mesh_laplacian_smoothing
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.manual_seed(0)
+
 
 ### Initialize smplx parameters + displacements given an smplx.SMPLXLayer object
 def get_init_mesh(smplx_model, subd, requires_grad=True, device:torch.device=device):
@@ -77,8 +76,33 @@ def construct_textured_mesh(smplx_model, texture_uv, global_orient, transl, body
     return smplx_mesh
 
 
+### Get l1 loss for difference between openpose keypoints and smplx joints
+def keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, device:torch.device=device):
+    # See https://github.com/vchoutas/smplx/blob/master/smplx/vertex_ids.py
+    # and https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/doc/02_output.md
+    openpose_kpts_ix = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+    smplx_kpts_ix = [55, 12, 17, 19, 21, 16, 18, 20, 2, 5, 8, 1, 4, 7, 56, 57, 58 ,59, 60, 61, 62, 63, 64, 65]
+
+    smplx_joints = smplx_model.forward(global_orient=axis_angle_to_matrix(global_orient),
+                                      body_pose=axis_angle_to_matrix(body_pose),
+                                      left_hand_pose=axis_angle_to_matrix(left_hand_pose),
+                                      right_hand_pose=axis_angle_to_matrix(right_hand_pose),
+                                      jaw_pose=axis_angle_to_matrix(jaw_pose),
+                                      expression=expression, betas=betas)['joints'].to(device)
+
+    kpts_preds = smplx_joints[0][smplx_kpts_ix] * scale # smplx keypoints prediction
+
+    # Extract openpose keypoints for subject and pose
+    kpts_filename = 'subject_%d/body/%s/reconstruction/keypoints.txt' % (subject, pose)
+    kpts_gt = torch.Tensor( np.loadtxt(kpts_filename)[openpose_kpts_ix] ).to(device) # openpose keypoints ground truth
+
+    l1_loss = torch.nn.L1Loss()
+
+    return l1_loss(kpts_preds, kpts_gt)
+
+
 ### Neural rendering
-def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv_path:str, subdivision:bool=True, rescale_factor:int=3, save_path:str=None):
+def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv_path:str, subdivision:bool=False, rescale_factor:int=3, save_path:str=None):
     ## Segment all photos
     camera_idx_list = []
     silh_photo_list = []
@@ -114,19 +138,21 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
 
     ## SMPL fitting + Neural rendering
     print('fit new smplx model to provided humbi smpl parameters')
-    global_orient, transl, body_pose, betas, scale, pose_loss, shape_loss = smpl2smplx(smplx_model, subject, pose, pose_iterations=200, shape_iterations=100)
+    global_orient, transl, body_pose, betas, scale = smpl2smplx(smplx_model, subject, pose, pose_iterations=200, shape_iterations=100)[:-2]
+
     left_hand_pose, right_hand_pose, jaw_pose, expression = get_init_mesh(smplx_model, subdivision)[3:7]
     verts_disps, texture = get_init_mesh(smplx_model, subdivision)[-2:]
-    init_body_pose = body_pose.detach()
 
-    # Seperating parameters in different optimizers helps the learning
+    # Seperating parameters in different optimizers improves the learning
+    geom_lr = 0.0001
+    txt_lr = 0.01
     opt_pose_shape = torch.optim.Adam([body_pose, betas], lr=0.01)
-    opt_geom = torch.optim.Adam([verts_disps], lr=0.001)
-    opt_txt = torch.optim.Adam([texture], lr=0.01)
+    opt_geom = torch.optim.Adam([verts_disps], lr=geom_lr)
+    opt_txt = torch.optim.Adam([texture], lr=txt_lr)
 
-    sched_pose_shape = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_pose_shape, patience=10, threshold=0.1, verbose=True)
+    sched_pose_shape = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_pose_shape, patience=5, threshold=0.1, verbose=True)
     sched_geom = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_geom, patience=5, threshold=0.1, verbose=True)
-    sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=10, threshold=0.1, verbose=True)
+    sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=5, threshold=0.1, verbose=True)
 
     l1_loss = torch.nn.L1Loss()
 
@@ -157,9 +183,9 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
 
             # Compute loss
             loss = l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render)
-            loss += 0.001 * torch.linalg.norm(body_pose - init_body_pose)
-            loss += 0.0001 * torch.linalg.norm(verts_disps_output)
-
+            loss += mesh_laplacian_smoothing(mesh, method='cot')
+            loss += keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale)
+            # loss += 0.0001 * torch.linalg.norm(verts_disps_output)
             total_loss += float(loss)
 
             # Backpropagate loss
@@ -183,11 +209,15 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
             filename = os.path.join(save_path, 'mesh_subj_%d_pose_%s_iter_%d.obj' % (subject, pose, i))
             save_obj(filename, verts=mesh.verts_packed(), faces=mesh.faces_packed(), verts_uvs=verts_uvs[0], faces_uvs=faces_uvs[0], texture_map=texture_output[0])
 
-    geometry = global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps_output
+        # Early stopping
+        if (opt_geom.param_groups[0]['lr'] < 0.01 * geom_lr) and (opt_txt.param_groups[0]['lr'] < 0.01 * txt_lr):
+            break
+
+    geometry = global_orient.detach(), transl.detach(), body_pose.detach(), left_hand_pose.detach(), right_hand_pose.detach(), jaw_pose.detach(), expression.detach(), betas.detach(), scale.detach(), verts_disps_output.detach()
 
     if save_path is not None:
         os.makedirs(save_path, exist_ok=True)
         filename = os.path.join(save_path, 'final_subj_%d_pose_%s.obj' % (subject, pose))
         save_obj(filename, verts=mesh.verts_packed(), faces=mesh.faces_packed(), verts_uvs=verts_uvs[0], faces_uvs=faces_uvs[0], texture_map=texture_output[0])
 
-    return geometry.detach(), texture_output.detach()
+    return geometry, texture_output.detach()

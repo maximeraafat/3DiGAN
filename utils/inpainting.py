@@ -1,8 +1,10 @@
 import torch
+import smplx
 import numpy as np
 
 from scipy import interpolate
-from torchvision.io import read_image
+from torchvision.io import read_image, ImageReadMode
+from torchvision.transforms import Resize
 
 from pytorch3d.io import load_obj
 from pytorch3d.structures import Meshes
@@ -17,6 +19,9 @@ def verts_uvs_positions(smplx_uv_path:str, map_size:int=1024):
 
     nb_verts = smplx_uv_mesh[0].shape[0]
 
+    # TODO : find pixel vertex uv positions for subdivided smplx mesh
+    assert(nb_verts == 10475), "can't find the right vertex uv positions for this .obj file"
+
     flatten_verts_idx = smplx_uv_mesh[1].verts_idx.flatten().to(device)
     flatten_textures_idx = smplx_uv_mesh[1].textures_idx.flatten().to(device)
     verts_uvs = smplx_uv_mesh[2].verts_uvs.to(device)
@@ -27,20 +32,22 @@ def verts_uvs_positions(smplx_uv_path:str, map_size:int=1024):
 
     uv_x = ( float(map_size) * verts_to_uvs[:,0] ).unsqueeze(0).to(device)
     uv_y = ( float(map_size) * (1.0 - verts_to_uvs[:,1]) ).unsqueeze(0).to(device)
-    verts_uvs_positions = torch.cat((uv_x, uv_y)).moveaxis(0,1).round().to(device)
+    verts_uvs_positions = torch.cat((uv_x, uv_y)).moveaxis(0,1).to(device)
 
     return verts_uvs_positions
 
 
 ### Create displacement map for each vertex and perform interpolation (inpaining) between vertex values
-def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str, path_to_textures:str, mask_disps:bool=False):
-    texture = read_image(path_to_textures + 'median_subject_%d.png' % subject)
-    texture = torch.moveaxis(texture, 0, 2).to(device)
-    map_size = texture.shape[:2]
+def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str, uv_mask_img:str, mask_disps:bool=False):
+    uv_mask = read_image(uv_mask_img, mode=ImageReadMode.GRAY_ALPHA)
+    # resize = Resize(uv_mask.shape[-1] * 4)
+    # uv_mask = resize(uv_mask)
+    uv_mask = torch.moveaxis(uv_mask, 0, 2).to(device)
+    map_size = uv_mask.shape[:2]
 
     verts_uvs = verts_uvs_positions(smplx_uv_path, map_size[0]).flip(1)
 
-    mask = (texture[:,:,0] == 0) & (texture[:,:,1] == 0) & (texture[:,:,2] == 0)
+    mask = (uv_mask[:,:,0] == 0) & (uv_mask[:,:,1] == 0)
 
     interp = interpolate.LinearNDInterpolator(points=verts_uvs.cpu(), values=displacements.detach().cpu().numpy(), fill_value=0)
     inpainted_displacements = interp( list(np.ndindex(map_size)) ).reshape(map_size)
@@ -48,4 +55,4 @@ def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str
     if mask_disps:
         inpainted_displacements[mask.cpu()] = 0
 
-    return torch.Tensor(inpainted_displacements).cpu(), ~mask.cpu(), texture.cpu()
+    return torch.Tensor(inpainted_displacements).cpu(), ~mask.cpu()

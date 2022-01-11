@@ -60,6 +60,7 @@ def humbi_smpl_mesh(subject:int, pose:str, device:torch.device=device):
 
     return smpl_mesh
 
+
 ### Given smplx parameters (orientation, pose, shape), construct corresponding mesh
 def construct_smplx_mesh(smplx_model, global_orient, transl, body_pose, betas, scale, device:torch.device=device):
     smplx_faces = torch.Tensor(smplx_model.faces.astype('int')).type(torch.int32).unsqueeze(0).to(device)
