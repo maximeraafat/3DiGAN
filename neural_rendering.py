@@ -19,10 +19,9 @@ from pytorch3d.structures import Meshes
 from pytorch3d.ops import SubdivideMeshes
 from pytorch3d.transforms import axis_angle_to_matrix
 from pytorch3d.renderer import PerspectiveCameras, TexturesUV
-from pytorch3d.loss import mesh_laplacian_smoothing
+from pytorch3d.loss import mesh_edge_loss, mesh_laplacian_smoothing
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-torch.manual_seed(0)
 
 
 ### Initialize smplx parameters + displacements given an smplx.SMPLXLayer object
@@ -90,7 +89,7 @@ def keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose,
                                       jaw_pose=axis_angle_to_matrix(jaw_pose),
                                       expression=expression, betas=betas)['joints'].to(device)
 
-    kpts_preds = smplx_joints[0][smplx_kpts_ix] * scale # smplx keypoints prediction
+    kpts_preds = smplx_joints[0][smplx_kpts_ix] * scale + transl # smplx keypoints prediction
 
     # Extract openpose keypoints for subject and pose
     kpts_filename = 'subject_%d/body/%s/reconstruction/keypoints.txt' % (subject, pose)
@@ -107,7 +106,7 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
     camera_idx_list = []
     silh_photo_list = []
     rgb_photo_list = []
-    print('segment all photos before neural rendering')
+    print('segment all photos before neural rendering for subject %d' % subject)
     cam_loop = tqdm(np.random.choice(107, 107, replace=False), total = 107)
     for camera_idx in cam_loop:
         try:
@@ -156,7 +155,7 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
 
     l1_loss = torch.nn.L1Loss()
 
-    print('neural rendering')
+    print('neural rendering for subject %d' % subject)
     loop = tqdm(total = iterations * len(camera_idx_list))
     for i in range(iterations):
         total_loss = 0.0
@@ -183,9 +182,10 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
 
             # Compute loss
             loss = l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render)
-            loss += mesh_laplacian_smoothing(mesh, method='cot')
+            loss += 2.0 * mesh_edge_loss(mesh)
+            loss += 2.0 * mesh_laplacian_smoothing(mesh, method='cot')
             loss += keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale)
-            # loss += 0.0001 * torch.linalg.norm(verts_disps_output)
+            loss += 0.00001 * torch.linalg.norm(verts_disps_output)
             total_loss += float(loss)
 
             # Backpropagate loss
@@ -204,20 +204,21 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
         sched_geom.step(total_loss)
         sched_txt.step(total_loss)
 
-        if save_path is not None and i%2 == 0 and i > 0:
+        if save_path is not None and i%3 == 0 and i > 0:
             os.makedirs(save_path, exist_ok=True)
-            filename = os.path.join(save_path, 'mesh_subj_%d_pose_%s_iter_%d.obj' % (subject, pose, i))
+            filename = os.path.join(save_path, 'obj_subj_%d_iter_%d.obj' % (subject, i))
             save_obj(filename, verts=mesh.verts_packed(), faces=mesh.faces_packed(), verts_uvs=verts_uvs[0], faces_uvs=faces_uvs[0], texture_map=texture_output[0])
 
         # Early stopping
         if (opt_geom.param_groups[0]['lr'] < 0.01 * geom_lr) and (opt_txt.param_groups[0]['lr'] < 0.01 * txt_lr):
+            print("early stopping since low learning rate already reached!\n")
             break
 
     geometry = global_orient.detach(), transl.detach(), body_pose.detach(), left_hand_pose.detach(), right_hand_pose.detach(), jaw_pose.detach(), expression.detach(), betas.detach(), scale.detach(), verts_disps_output.detach()
 
     if save_path is not None:
         os.makedirs(save_path, exist_ok=True)
-        filename = os.path.join(save_path, 'final_subj_%d_pose_%s.obj' % (subject, pose))
+        filename = os.path.join(save_path, 'obj_subj_%d_final.obj' % subject)
         save_obj(filename, verts=mesh.verts_packed(), faces=mesh.faces_packed(), verts_uvs=verts_uvs[0], faces_uvs=faces_uvs[0], texture_map=texture_output[0])
 
     return geometry, texture_output.detach()
