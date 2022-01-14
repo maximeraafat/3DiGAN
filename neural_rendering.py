@@ -19,7 +19,7 @@ from pytorch3d.structures import Meshes
 from pytorch3d.ops import SubdivideMeshes
 from pytorch3d.transforms import axis_angle_to_matrix
 from pytorch3d.renderer import PerspectiveCameras, TexturesUV
-from pytorch3d.loss import mesh_edge_loss, mesh_laplacian_smoothing
+from pytorch3d.loss import mesh_laplacian_smoothing, mesh_edge_loss
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -182,10 +182,10 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
 
             # Compute loss
             loss = l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render)
-            loss += 2.0 * mesh_edge_loss(mesh)
             loss += 2.0 * mesh_laplacian_smoothing(mesh, method='cot')
+            loss += 10.0 * mesh_edge_loss(mesh)
             loss += keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale)
-            loss += 0.00001 * torch.linalg.norm(verts_disps_output)
+            # loss += 0.00000001 * torch.linalg.norm(verts_disps_output)
             total_loss += float(loss)
 
             # Backpropagate loss

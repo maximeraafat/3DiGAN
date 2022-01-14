@@ -62,58 +62,62 @@ def main():
     for subject in subjects:
         # do not download subject data if it already exists
         exists = os.path.exists('subject_%d' % subject)
+        if exists:
+            loaded = True
+
         if not exists:
-            download_subject(subject, [attributes])
+            loaded = download_subject(subject, [attributes])
 
-        pose = get_pose(subject, attributes)
+        if loaded:
+            pose = get_pose(subject, attributes)
 
-        # Neural rendering
-        if not subdivision:
-            geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, obj_path, subdivision, rescale_factor=2, save_path=save_path_objs)
-        else:
-            geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, subd_obj_path, subdivision, rescale_factor=2, save_path=save_path_objs)
+            # Neural rendering
+            if not subdivision:
+                geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, obj_path, subdivision, rescale_factor=2, save_path=save_path_objs)
+            else:
+                geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, subd_obj_path, subdivision, rescale_factor=2, save_path=save_path_objs)
 
-        # Extract geometry
-        global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps = geometry
+            # Extract geometry
+            global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps = geometry
 
-        # Store geometry into displacements along normals + get displaced and initial mesh
-        learned_geometry = smplx2disps(smplx_model, betas, scale, verts_disps, subdivision, smoothing=2)[0]
+            # Store geometry into displacements along normals + get displaced and initial mesh
+            learned_geometry = smplx2disps(smplx_model, betas, scale, verts_disps, subdivision, smoothing=2)[0]
 
-        # Construct displacement map by interpolating values between uv vertex coordinates (inpainting) : for now only available for no subdivision!
-        if not subdivision:
-            displacement_map = get_disps_inpaint(subject, learned_geometry, obj_path, uv_mask_img, mask_disps=True)[0]
+            # Construct displacement map by interpolating values between uv vertex coordinates (inpainting) : for now only available for no subdivision!
+            if not subdivision:
+                displacement_map = get_disps_inpaint(subject, learned_geometry, obj_path, uv_mask_img, mask_disps=True)[0]
 
-        # Save rgb color map and displacement map as textures
-        os.makedirs(save_path_imgs, exist_ok=True)
-        rgb_filename = os.path.join(save_path_imgs, 'rgb_texture_%d.png' % subject)
-        disp_filename = os.path.join(save_path_imgs, 'disp_texture_%d.tiff' % subject)
+            # Save rgb color map and displacement map as textures
+            os.makedirs(save_path_imgs, exist_ok=True)
+            rgb_filename = os.path.join(save_path_imgs, 'rgb_texture_%d.png' % subject)
+            disp_filename = os.path.join(save_path_imgs, 'disp_texture_%d.tiff' % subject)
 
-        nrm_rgb_map = (texture[0].cpu().numpy() * 255.0).astype(np.uint8)
-        Image.fromarray(nrm_rgb_map).save(rgb_filename)
-        if not subdivision:
-            nrm_disps_map = cv2.normalize(displacement_map.numpy(), None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-            Image.fromarray(nrm_disps_map, mode='F').save(disp_filename)
+            nrm_rgb_map = (texture[0].cpu().numpy() * 255.0).astype(np.uint8)
+            Image.fromarray(nrm_rgb_map).save(rgb_filename)
+            if not subdivision:
+                nrm_disps_map = cv2.normalize(displacement_map.numpy(), None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+                Image.fromarray(nrm_disps_map, mode='F').save(disp_filename)
 
-        # Save geometry in npz file
-        body_pose = body_pose.cpu().numpy()
-        betas = betas.cpu().numpy()
-        scale = scale.cpu().numpy()
-        verts_disps = verts_disps.cpu().numpy()
-        learned_geometry = learned_geometry.cpu().numpy()
+            # Save geometry in npz file
+            body_pose = body_pose.cpu().numpy()
+            betas = betas.cpu().numpy()
+            scale = scale.cpu().numpy()
+            verts_disps = verts_disps.cpu().numpy()
+            learned_geometry = learned_geometry.cpu().numpy()
 
-        os.makedirs(save_path_npz, exist_ok=True)
-        geometry_filename = os.path.join(save_path_npz, 'output_subject_%d.npz' % subject)
-        np.savez(geometry_filename, body_pose=body_pose, betas=betas, scale=scale, verts_disps=verts_disps, learned_geometry=learned_geometry)
+            os.makedirs(save_path_npz, exist_ok=True)
+            geometry_filename = os.path.join(save_path_npz, 'output_subject_%d.npz' % subject)
+            np.savez(geometry_filename, body_pose=body_pose, betas=betas, scale=scale, verts_disps=verts_disps, learned_geometry=learned_geometry)
 
-        '''
-        # Loading npz file
-        npzfile = np.load(outfile)
-        npzfile.files # see all stored arrays in npz file
-        npzfile['body_pose'] # call body_pose array stored into npz file
-        '''
+            '''
+            # Loading npz file
+            npzfile = np.load(outfile)
+            npzfile.files # see all stored arrays in npz file
+            npzfile['body_pose'] # call body_pose array stored into npz file
+            '''
 
         # do not remove subject data if it already existed
-        if not exists:
+        if not exists and loaded:
             remove_subject(subject)
 
     print('\nDone!')
