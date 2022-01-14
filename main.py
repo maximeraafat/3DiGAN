@@ -11,7 +11,7 @@ from utils.download_humbi import download_subject, get_pose, remove_subject
 from utils.smplx_to_disps import smplx2disps
 from utils.inpainting import get_disps_inpaint
 
-SUBJECT_IDS = range(1, 618)
+SUBJECT_IDS = 'range(1, 618)'
 
 parser = argparse.ArgumentParser()
 
