@@ -118,7 +118,13 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
 
         # Segment person in photo from camera viewpoint
         photo_path = 'subject_%s/body/%s/image/image%s.jpg' % (subject, pose, str(camera_idx).zfill(7))
-        photo, silh_photo, rgb_photo = get_pointrend_segmentation(photo_path, device=device)
+
+        # Sometimes camera exists, but still no corresponding photo
+        try:
+            photo, silh_photo, rgb_photo = get_pointrend_segmentation(photo_path, device=device)
+        except:
+            print('image image%s.jpg does not exist' % str(camera_idx).zfill(7))
+            continue
 
         silh_photo = silh_photo[0, ::rescale_factor, ::rescale_factor].float().to(device)
         rgb_photo = rgb_photo[0, ::rescale_factor, ::rescale_factor].to(device)

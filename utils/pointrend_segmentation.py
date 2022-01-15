@@ -39,7 +39,6 @@ predictor = DefaultPredictor(cfg)
 
 ### PointRend segmentation for an image located in img_path
 def get_pointrend_segmentation(img_path, predictor=predictor, class_id=0, device:torch.device=device):
-
     img = read_image(img_path).permute(1, 2, 0).to(device)
     outputs = predictor(img[:,:,[2,1,0]].cpu().numpy())
 
