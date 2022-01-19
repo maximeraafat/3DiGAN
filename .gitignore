@@ -6,3 +6,5 @@ detectron2_repo/
 __pycache__/
 .DS_Store
 subject_*
+/humbi_output
+/log_outputs

@@ -60,8 +60,8 @@ def construct_textured_mesh(smplx_model, texture_uv, global_orient, transl, body
                                       expression=expression, betas=betas)['vertices'].to(device)
 
     if subd:
+        subdivide = SubdivideMeshes()
         smplx_mesh = Meshes(smplx_verts, smplx_faces)
-        subdivide = SubdivideMeshes(smplx_mesh)
         smplx_mesh = subdivide.forward(smplx_mesh)
         smplx_verts = smplx_mesh.verts_packed().unsqueeze(0)
         smplx_faces = smplx_mesh.faces_packed().unsqueeze(0)

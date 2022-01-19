@@ -12,7 +12,7 @@ from pytorch3d.structures import Meshes
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-### Extract vertex uv pixel positions on a 2D square map
+### Compute vertex uv pixel positions onto a 2D square map
 def verts_uvs_positions(smplx_uv_path:str, map_size:int=1024):
     # See https://github.com/facebookresearch/pytorch3d/discussions/588
     smplx_uv_mesh = load_obj(smplx_uv_path, load_textures=False)

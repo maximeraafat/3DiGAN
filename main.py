@@ -60,7 +60,7 @@ def main():
     attributes = 'body'
 
     for subject in subjects:
-        # do not download subject data if it already exists
+        # Do not download subject data if it already exists
         exists = os.path.exists('subject_%d' % subject)
         if exists:
             loaded = True

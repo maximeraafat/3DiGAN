@@ -22,7 +22,7 @@ def extract_smpl_param(subject:int, pose:str, device:torch.device=device):
     smpl_param = np.loadtxt(filename)
 
     ## See https://github.com/zhixuany/HUMBI#body--cloth for how to extract parameters
-    ## and https://issueexplorer.com/issue/facebookresearch/frankmocap/91 to see smpl pose to smplx
+    ## and https://github.com/facebookresearch/frankmocap/issues/91 to see smpl pose to smplx
 
     scale = torch.Tensor([smpl_param[0]]).to(device) # smpl and smplx compatible
     transl = torch.Tensor(smpl_param[1:4]).to(device) # smpl and smplx compatible (no perfect match)
