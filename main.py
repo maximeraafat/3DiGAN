@@ -5,6 +5,7 @@ import torch
 import smplx
 import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 
 from neural_rendering import neural_renderer
 from utils.download_humbi import download_subject, get_pose, remove_subject
@@ -55,8 +56,6 @@ def main():
     smplx_model_path = args.gdrive + 'smplx'
     smplx_model = smplx.SMPLXLayer(smplx_model_path, 'neutral').to(device)
 
-    smoothing = args.smoothing
-
     attributes = 'body'
 
     for subject in subjects:
@@ -81,11 +80,14 @@ def main():
             global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps = geometry
 
             # Store geometry into displacements along normals + get displaced and initial mesh
-            learned_geometry = smplx2disps(smplx_model, betas, scale, verts_disps, subdivision, smoothing=2)[0]
+            learned_geometry = smplx2disps(smplx_model, betas, scale, verts_disps, subdivision, smoothing=1*args.smoothing)[0]
 
             # Construct displacement map by interpolating values between uv vertex coordinates (inpainting) : for now only available for no subdivision!
             if not subdivision:
-                displacement_map = get_disps_inpaint(subject, learned_geometry, obj_path, uv_mask_img, mask_disps=True)[0]
+                disps_x = get_disps_inpaint(subject, learned_geometry[:,0], obj_path, uv_mask_img, mask_disps=True)[0]
+                disps_y = get_disps_inpaint(subject, learned_geometry[:,1], obj_path, uv_mask_img, mask_disps=True)[0]
+                disps_z = get_disps_inpaint(subject, learned_geometry[:,2], obj_path, uv_mask_img, mask_disps=True)[0]
+                displacement_map = torch.cat((disps_x.unsqueeze(2), disps_y.unsqueeze(2), disps_z.unsqueeze(2)), dim=2)
 
             # Save rgb color map and displacement map as textures
             os.makedirs(save_path_imgs, exist_ok=True)
@@ -95,8 +97,9 @@ def main():
             nrm_rgb_map = (texture[0].cpu().numpy() * 255.0).astype(np.uint8)
             Image.fromarray(nrm_rgb_map).save(rgb_filename)
             if not subdivision:
-                nrm_disps_map = cv2.normalize(displacement_map.numpy(), None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-                Image.fromarray(nrm_disps_map, mode='F').save(disp_filename)
+                plt.imsave(disp_filename, displacement_map.cpu().numpy() + 0.5) # PIL does not support storing 3 channel TIFF images
+                # nrm_disps_map = cv2.normalize(displacement_map.numpy(), None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+                # Image.fromarray(nrm_disps_map, mode='F').save(disp_filename)
 
             # Save geometry in npz file
             body_pose = body_pose.cpu().numpy()
@@ -111,7 +114,7 @@ def main():
 
             '''
             # Loading npz file
-            npzfile = np.load(outfile)
+            npzfile = np.load(geometry_filename)
             npzfile.files # see all stored arrays in npz file
             npzfile['body_pose'] # call body_pose array stored into npz file
             '''

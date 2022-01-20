@@ -30,10 +30,12 @@ def smplx2disps(smplx_model, betas, scale, verts_disps, subdivision, smoothing:i
         displaced_mesh = taubin_smoothing(displaced_mesh.detach(), num_iter=smoothing)
 
     displacements = displaced_mesh.verts_packed() - init_mesh.verts_packed()
-    displacements_along_nrm = torch.sum(displacements * init_mesh.verts_normals_packed(), dim=1).cpu()
-    displacements_along_nrm /= scale.item()
+    displacements /= scale.item()
+
+    # displacements_along_nrm = torch.sum(displacements * init_mesh.verts_normals_packed(), dim=1).cpu()
+    # displacements_along_nrm /= scale.item()
 
     # Plotting issue (plot_structure) if we don't reconstruct the mesh here? Why??
     displaced_mesh = Meshes(displaced_mesh.verts_padded(), displaced_mesh.faces_padded())
 
-    return displacements_along_nrm, init_mesh, displaced_mesh
+    return displacements, init_mesh, displaced_mesh
