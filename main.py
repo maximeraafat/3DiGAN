@@ -50,7 +50,8 @@ def main():
     if args.saveobj:
         save_path_objs = args.gdrive + 'humbi_output/humbi_smplx_objs'
 
-    save_path_imgs = args.gdrive + 'humbi_output/humbi_smplx_imgs'
+    save_path_rgb = args.gdrive + 'humbi_output/humbi_smplx_rgb'
+    save_path_geom = args.gdrive + 'humbi_output/humbi_smplx_geom'
     save_path_npz = args.gdrive + 'humbi_output/humbi_smplx_npz'
 
     smplx_model_path = args.gdrive + 'smplx'
@@ -90,9 +91,10 @@ def main():
                 displacement_map = torch.cat((disps_x.unsqueeze(2), disps_y.unsqueeze(2), disps_z.unsqueeze(2)), dim=2)
 
             # Save rgb color map and displacement map as textures
-            os.makedirs(save_path_imgs, exist_ok=True)
-            rgb_filename = os.path.join(save_path_imgs, 'rgb_texture_%d.png' % subject)
-            disp_filename = os.path.join(save_path_imgs, 'disp_texture_%d.tiff' % subject)
+            os.makedirs(save_path_rgb, exist_ok=True)
+            os.makedirs(save_path_geom, exist_ok=True)
+            rgb_filename = os.path.join(save_path_rgb, 'rgb_texture_%d.png' % subject)
+            disp_filename = os.path.join(save_path_geom, 'disp_texture_%d.tiff' % subject)
 
             nrm_rgb_map = (texture[0].cpu().numpy() * 255.0).astype(np.uint8)
             Image.fromarray(nrm_rgb_map).save(rgb_filename)

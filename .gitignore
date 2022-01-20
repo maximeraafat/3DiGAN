@@ -8,3 +8,4 @@ __pycache__/
 subject_*
 /humbi_output
 /log_outputs
+/temporary_files
