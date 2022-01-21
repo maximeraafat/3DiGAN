@@ -1284,14 +1284,14 @@ class Trainer():
         # regular
 
         generated_images = self.generate_(self.GAN.G, latents)
-        torchvision.utils.save_image(generated_images[...,:3], str(self.results_dir / self.name / f'{str(num)}_rgb.{ext}'), nrow=num_rows)
-        torchvision.utils.save_image(generated_images[...,3:], str(self.results_dir / self.name / f'{str(num)}_disp.{ext}'), nrow=num_rows)
+        torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb.{ext}'), nrow=num_rows)
+        torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp.{ext}'), nrow=num_rows)
 
         # moving averages
 
         generated_images = self.generate_(self.GAN.GE, latents)
-        torchvision.utils.save_image(generated_images[...,:3], str(self.results_dir / self.name / f'{str(num)}_rgb-ema.{ext}'), nrow=num_rows)
-        torchvision.utils.save_image(generated_images[...,3:], str(self.results_dir / self.name / f'{str(num)}_disp-ema.{ext}'), nrow=num_rows)
+        torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb-ema.{ext}'), nrow=num_rows)
+        torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp-ema.{ext}'), nrow=num_rows)
 
     @torch.no_grad()
     def generate(self, num=0, num_image_tiles=4, checkpoint=None, types=['default', 'ema']):
