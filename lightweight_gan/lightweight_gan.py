@@ -342,7 +342,7 @@ class ImageDataset(Dataset):
         img = Image.open(path)
 
         if self.rgbxyz:
-            disp_path = self.paths[index]
+            disp_path = self.disp_paths[index]
             disp_img = Image.open(disp_path)
             transf_img = np.asarray(self.transform(img))
             transf_disps = np.asarray(self.transform(disp_img))
