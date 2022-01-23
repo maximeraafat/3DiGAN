@@ -1,11 +1,9 @@
 smplx/
-humbi_maps/
-generated_maps/
 detectron2_repo/
+subject_*/
+humbi_output/
+log_outputs/
+tmp_*/
 .ipynb_checkpoints/
 __pycache__/
 .DS_Store
-subject_*
-/humbi_output
-/log_outputs
-/temporary_files
