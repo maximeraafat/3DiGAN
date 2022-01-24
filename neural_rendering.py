@@ -9,17 +9,17 @@ import torch
 import smplx
 import numpy as np
 
-from utils.smpl_to_smplx import smpl2smplx
-from utils.camera_calibration import get_camera_parameters
-from utils.renderers import get_renderers
-from utils.pointrend_segmentation import get_pointrend_segmentation
-
 from pytorch3d.io import load_obj, save_obj
 from pytorch3d.structures import Meshes
 from pytorch3d.ops import SubdivideMeshes
 from pytorch3d.transforms import axis_angle_to_matrix
 from pytorch3d.renderer import PerspectiveCameras, TexturesUV
 from pytorch3d.loss import mesh_laplacian_smoothing, mesh_edge_loss
+
+from utils.smpl_to_smplx import smpl2smplx
+from utils.camera_calibration import get_camera_parameters
+from utils.renderers import get_renderers
+from utils.pointrend_segmentation import get_pointrend_segmentation
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

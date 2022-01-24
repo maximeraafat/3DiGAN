@@ -39,8 +39,14 @@ def get_pose(subject:int, attribute:str):
     else:
         attribute_path = attribute
 
-    poses_path = os.path.join('subject_%d' % subject, attribute_path)
+    special_subjects = [39, 123, 133, 264, 299, 458, 461, 464, 515, 544, 555, 572, 579, 612, 617]
+    special_poses = ['00000209', '00000057', '00000041', '00000121', '00000217', '00000179', '00000211', '00000163', '00000355', '00000179', '00000339', '00000147', '00000115', '00000147', '00000179']
+    if subject in special_subjects:
+        new_pose = special_poses[special_subjects.index(subject)]
+        print('pose %s for subject %d is not T-pose, we replace with a manually selected pose : %s' (pose, subject, new_pose))
+        pose = new_pose
 
+    poses_path = os.path.join('subject_%d' % subject, attribute_path)
     if pose not in os.listdir(poses_path):
         new_pose = sorted(os.listdir(poses_path))[0]
         print('pose %s not available for subject %d, we replace with first pose available : %s' % (pose, subject, new_pose))
