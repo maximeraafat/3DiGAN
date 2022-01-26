@@ -112,6 +112,7 @@ def main():
     print('\nhumbi reconstruction done: %d rgb textures saved!' % rgb_saved)
 
     # Save displacement map as normalized texture (should not be used in 3D software yet, e.g. Blender : denormalize first)
+    # We do this in order to take advantage of all pixel intensities from 0 (smallest displacement) to 255 (biggest displacement)
     disp_saved = normalize_displacements(subjects, save_path_npz, save_path_geom, obj_path, uv_mask_img)
 
     print('\n%d displacement textures saved!' % disp_saved)
