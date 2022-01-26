@@ -4,13 +4,12 @@ import cv2
 import torch
 import smplx
 import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
 
 from neural_rendering import neural_renderer
 from utils.download_humbi import download_subject, get_pose, remove_subject
 from utils.smplx_to_disps import smplx2disps
 from utils.inpainting import get_disps_inpaint
+from utils.normalize_disps import normalize_displacements
 
 SUBJECT_IDS = 'range(1, 618)'
 
@@ -35,7 +34,12 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def main():
+    # Reproducibility : see https://pytorch.org/docs/stable/notes/randomness.html
     torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     subjects = eval(args.subjects)
     assert( isinstance(subjects, list) or isinstance(subjects, range) ), '--subjects needs to be a valid list or range passed as a string'
@@ -55,10 +59,11 @@ def main():
     save_path_npz = args.gdrive + 'humbi_output/humbi_smplx_npz'
 
     smplx_model_path = args.gdrive + 'smplx'
-    smplx_model = smplx.SMPLXLayer(smplx_model_path, 'neutral').to(device)
+    smplx_model = smplx.SMPLXLayer(smplx_model_path, gender='neutral').to(device)
 
     attributes = 'body'
 
+    rgb_saved = 0 # count how many rgb textures are saved
     for subject in subjects:
         # Do not download subject data if it already exists
         exists = os.path.exists('subject_%d' % subject)
@@ -83,25 +88,11 @@ def main():
             # Store geometry into displacements along normals + get displaced and initial mesh
             learned_geometry = smplx2disps(smplx_model, betas, scale, verts_disps, subdivision, smoothing=1*args.smoothing)[0]
 
-            # Construct displacement map by interpolating values between uv vertex coordinates (inpainting) : for now only available for no subdivision!
-            if not subdivision:
-                disps_x = get_disps_inpaint(subject, learned_geometry[:,0], obj_path, uv_mask_img, mask_disps=True)[0]
-                disps_y = get_disps_inpaint(subject, learned_geometry[:,1], obj_path, uv_mask_img, mask_disps=True)[0]
-                disps_z = get_disps_inpaint(subject, learned_geometry[:,2], obj_path, uv_mask_img, mask_disps=True)[0]
-                displacement_map = torch.cat((disps_x.unsqueeze(2), disps_y.unsqueeze(2), disps_z.unsqueeze(2)), dim=2)
-
-            # Save rgb color map and displacement map as textures
+            # Save rgb color map as texture
             os.makedirs(save_path_rgb, exist_ok=True)
-            os.makedirs(save_path_geom, exist_ok=True)
             rgb_filename = os.path.join(save_path_rgb, 'rgb_texture_%d.png' % subject)
-            disp_filename = os.path.join(save_path_geom, 'disp_texture_%d.tiff' % subject)
-
             nrm_rgb_map = (texture[0].cpu().numpy() * 255.0).astype(np.uint8)
-            Image.fromarray(nrm_rgb_map).save(rgb_filename)
-            if not subdivision:
-                plt.imsave(disp_filename, displacement_map.cpu().numpy() + 0.5) # PIL does not support storing 3 channel TIFF images
-                # nrm_disps_map = cv2.normalize(displacement_map.numpy(), None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-                # Image.fromarray(nrm_disps_map, mode='F').save(disp_filename)
+            rgb_saved += cv2.imwrite(rgb_filename, cv2.cvtColor(nrm_rgb_map, cv2.COLOR_BGR2RGB))
 
             # Save geometry in npz file
             body_pose = body_pose.cpu().numpy()
@@ -114,19 +105,18 @@ def main():
             geometry_filename = os.path.join(save_path_npz, 'output_subject_%d.npz' % subject)
             np.savez(geometry_filename, body_pose=body_pose, betas=betas, scale=scale, verts_disps=verts_disps, learned_geometry=learned_geometry)
 
-            '''
-            # Loading npz file
-            npzfile = np.load(geometry_filename)
-            npzfile.files # see all stored arrays in npz file
-            npzfile['body_pose'] # call body_pose array stored into npz file
-            '''
-
         # do not remove subject data if it already existed
         if not exists and loaded:
             remove_subject(subject)
 
-    print('\nDone!')
+    print('\nhumbi reconstruction done: %d rgb textures saved!' % rgb_saved)
 
+    # Save displacement map as normalized texture (should not be used in 3D software yet, e.g. Blender : denormalize first)
+    disp_saved = normalize_displacements(subjects, save_path_npz, save_path_geom, obj_path, uv_mask_img)
+
+    print('\n%d displacement textures saved!' % disp_saved)
+
+    return
 
 if __name__ == '__main__':
     main()

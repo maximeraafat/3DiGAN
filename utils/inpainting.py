@@ -38,7 +38,7 @@ def verts_uvs_positions(smplx_uv_path:str, map_size:int=1024):
 
 
 ### Create displacement map for each vertex and perform interpolation (inpaining) between vertex values
-def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str, uv_mask_img:str, mask_disps:bool=False):
+def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str, uv_mask_img:str, mask_disps:bool=False, fill_value:int=0):
     uv_mask = read_image(uv_mask_img, mode=ImageReadMode.GRAY_ALPHA)
     # resize = Resize(uv_mask.shape[-1] * 4)
     # uv_mask = resize(uv_mask)
@@ -49,10 +49,10 @@ def get_disps_inpaint(subject:int, displacements:torch.Tensor, smplx_uv_path:str
 
     mask = (uv_mask[:,:,0] == 0) & (uv_mask[:,:,1] == 0)
 
-    interp = interpolate.LinearNDInterpolator(points=verts_uvs.cpu(), values=displacements.detach().cpu().numpy(), fill_value=0)
+    interp = interpolate.LinearNDInterpolator(points=verts_uvs.cpu(), values=displacements.detach().cpu(), fill_value=fill_value)
     inpainted_displacements = interp( list(np.ndindex(map_size)) ).reshape(map_size)
 
     if mask_disps:
-        inpainted_displacements[mask.cpu()] = 0
+        inpainted_displacements[mask.cpu()] = fill_value
 
     return torch.Tensor(inpainted_displacements).cpu(), ~mask.cpu()

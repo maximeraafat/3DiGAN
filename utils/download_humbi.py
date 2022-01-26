@@ -43,7 +43,7 @@ def get_pose(subject:int, attribute:str):
     special_poses = ['00000209', '00000057', '00000041', '00000121', '00000217', '00000179', '00000211', '00000163', '00000355', '00000179', '00000339', '00000147', '00000115', '00000147', '00000179']
     if subject in special_subjects:
         new_pose = special_poses[special_subjects.index(subject)]
-        print('pose %s for subject %d is not T-pose, we replace with a manually selected pose : %s' (pose, subject, new_pose))
+        print('pose %s for subject %d is not T-pose, we replace with a manually selected pose : %s' % (pose, subject, new_pose))
         pose = new_pose
 
     poses_path = os.path.join('subject_%d' % subject, attribute_path)
