@@ -100,9 +100,9 @@ def train_from_folder(
     generate_types = ['default', 'ema'],
     generate_interpolation = False,
     aug_test = False,
-    aug_prob=None,
-    aug_types=['cutout', 'translation'],
-    dataset_aug_prob=0.,
+    aug_prob = None,
+    aug_types = ['cutout', 'translation'],
+    dataset_aug_prob = 0.,
     attn_res_layers = [32],
     freq_chan_attn = False,
     disc_output_size = 1,
@@ -182,13 +182,22 @@ def train_from_folder(
     world_size = torch.cuda.device_count()
 
     if world_size == 1 or not multi_gpus:
-        run_training(0, 1, model_args, data, disp_data, load_from, new, num_train_steps, name, seed)
+        if rgbxyz:
+            run_training(0, 1, model_args, data, disp_data, load_from, new, num_train_steps, name, seed)
+        else:
+            run_training(0, 1, model_args, data, None, load_from, new, num_train_steps, name, seed)
         return
 
-    mp.spawn(run_training,
-        args=(world_size, model_args, data, disp_data, load_from, new, num_train_steps, name, seed),
-        nprocs=world_size,
-        join=True)
+    if rgbxyz:
+        mp.spawn(run_training,
+            args=(world_size, model_args, data, disp_data, load_from, new, num_train_steps, name, seed),
+            nprocs=world_size,
+            join=True)
+    else:
+        mp.spawn(run_training,
+            args=(world_size, model_args, data, None, load_from, new, num_train_steps, name, seed),
+            nprocs=world_size,
+            join=True)
 
 def main():
     fire.Fire(train_from_folder)

@@ -299,12 +299,13 @@ class ImageDataset(Dataset):
         super().__init__()
         self.rgbxyz = rgbxyz
         self.folder = folder
-        self.disp_folder = disp_folder
         self.image_size = image_size
         self.paths = [p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-        self.disp_paths = [p for ext in EXTS for p in Path(f'{disp_folder}').glob(f'**/*.{ext}')]
         assert len(self.paths) > 0, f'No images were found in {folder} for training'
-        assert len(self.disp_paths) > 0, f'No images were found in {disp_folder} for training'
+        if rgbxyz:
+            self.disp_folder = disp_folder
+            self.disp_paths = [p for ext in EXTS for p in Path(f'{disp_folder}').glob(f'**/*.{ext}')]
+            assert len(self.disp_paths) > 0, f'No images were found in {disp_folder} for training'
 
         if transparent:
             num_channels = 4
@@ -1284,14 +1285,21 @@ class Trainer():
         # regular
 
         generated_images = self.generate_(self.GAN.G, latents)
-        torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb.{ext}'), nrow=num_rows)
-        torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp.{ext}'), nrow=num_rows)
+
+        if self.rgbxyz:
+            torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb.{ext}'), nrow=num_rows)
+            torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp.{ext}'), nrow=num_rows)
+        else:
+            torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
 
         # moving averages
 
         generated_images = self.generate_(self.GAN.GE, latents)
-        torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb-ema.{ext}'), nrow=num_rows)
-        torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp-ema.{ext}'), nrow=num_rows)
+        if self.rgbxyz:
+            torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb-ema.{ext}'), nrow=num_rows)
+            torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp-ema.{ext}'), nrow=num_rows)
+        else:
+            torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
 
     @torch.no_grad()
     def generate(self, num=0, num_image_tiles=4, checkpoint=None, types=['default', 'ema']):
@@ -1310,16 +1318,28 @@ class Trainer():
             for i in tqdm(range(num_image_tiles), desc='Saving generated default images'):
                 latents = torch.randn((1, latent_dim)).cuda(self.rank)
                 generated_image = self.generate_(self.GAN.G, latents)
-                path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}.{ext}')
-                torchvision.utils.save_image(generated_image[0], path, nrow=1)
+                if self.rgbxyz:
+                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rgb.{ext}')
+                    path_disp = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_disp.{ext}')
+                    torchvision.utils.save_image(generated_image[0][:3,...], path, nrow=1)
+                    torchvision.utils.save_image(generated_image[0][3:,...], path_disp, nrow=1)
+                else:
+                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}.{ext}')
+                    torchvision.utils.save_image(generated_image[0], path, nrow=1)
 
         # moving averages
         if 'ema' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated EMA images'):
                 latents = torch.randn((1, latent_dim)).cuda(self.rank)
                 generated_image = self.generate_(self.GAN.GE, latents)
-                path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema.{ext}')
-                torchvision.utils.save_image(generated_image[0], path, nrow=1)
+                if self.rgbxyz:
+                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rgb-ema.{ext}')
+                    path_disp = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_disp-ema.{ext}')
+                    torchvision.utils.save_image(generated_image[0][:3,...], path, nrow=1)
+                    torchvision.utils.save_image(generated_image[0][3:,...], path_disp, nrow=1)
+                else:
+                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema.{ext}')
+                    torchvision.utils.save_image(generated_image[0], path, nrow=1)
 
         return dir_full
 
@@ -1348,14 +1368,26 @@ class Trainer():
             # regular
             if 'default' in types:
                 generated_image = self.generate_(self.GAN.G, latents)
-                path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}.{ext}')
-                torchvision.utils.save_image(generated_image, path, nrow=num_images)
+                if self.rgbxyz:
+                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_rgb.{ext}')
+                    path_disp = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_disp.{ext}')
+                    torchvision.utils.save_image(generated_image[:,:3,...], path, nrow=num_images)
+                    torchvision.utils.save_image(generated_image[:,3:,...], path_disp, nrow=num_images)
+                else:
+                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}.{ext}')
+                    torchvision.utils.save_image(generated_image, path, nrow=num_images)
 
             # moving averages
             if 'ema' in types:
                 generated_image = self.generate_(self.GAN.GE, latents)
-                path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}-ema.{ext}')
-                torchvision.utils.save_image(generated_image, path, nrow=num_images)
+                if self.rgbxyz:
+                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_rgb-ema.{ext}')
+                    path_disp = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_disp-ema.{ext}')
+                    torchvision.utils.save_image(generated_image[:,:3,...], path, nrow=num_images)
+                    torchvision.utils.save_image(generated_image[:,3:,...], path_disp, nrow=num_images)
+                else:
+                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}-ema.{ext}')
+                    torchvision.utils.save_image(generated_image, path, nrow=num_images)
 
     @torch.no_grad()
     def calculate_fid(self, num_batches):
@@ -1374,7 +1406,11 @@ class Trainer():
                 real_batch = next(self.loader)
                 for k, image in enumerate(real_batch.unbind(0)):
                     ind = k + batch_num * self.batch_size
-                    torchvision.utils.save_image(image, real_path / f'{ind}.png')
+                    if self.rgbxyz:
+                        torchvision.utils.save_image(image[:,:3,...], real_path / f'{ind}_rgb.png')
+                        torchvision.utils.save_image(image[:,3:,...], real_path / f'{ind}_disp.png')
+                    else:
+                        torchvision.utils.save_image(image, real_path / f'{ind}.png')
 
         # generate a bunch of fake images in results / name / fid_fake
 
@@ -1396,7 +1432,11 @@ class Trainer():
 
             for j, image in enumerate(generated_images.unbind(0)):
                 ind = j + batch_num * self.batch_size
-                torchvision.utils.save_image(image, str(fake_path / f'{str(ind)}-ema.{ext}'))
+                if self.rgbxyz:
+                    torchvision.utils.save_image(image[:,:3,...], str(fake_path / f'{str(ind)}_rgb-ema.{ext}'))
+                    torchvision.utils.save_image(image[:,3:,...], str(fake_path / f'{str(ind)}_disp-ema.{ext}'))
+                else:
+                    torchvision.utils.save_image(image, str(fake_path / f'{str(ind)}-ema.{ext}'))
 
         return fid_score.calculate_fid_given_paths([str(real_path), str(fake_path)], 256, latents.device, 2048)
 
