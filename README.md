@@ -1,5 +1,29 @@
-# Generated Textured Avatars
+# GTA : Generated Textured Avatars
 
-We explore existing approaches of both generative 3D modelling and 2D image synthesis, with the goal of developing a method that will allow generation of synthetic appearances of humans. As a starting point, we experiment with recent state-of-the-art image generation methods applied to texture maps of human 3D models.
+**GTA** is a method for synthetizing virtual humans from a dataset of UV textures, which currently consists of two main features.
 
-We use the HUMBI dataset for training : https://www.humbi-data.net
+1. [SMPL-X](https://github.com/vchoutas/smplx) UV texture reconstruction for subjects in [HUMBI](https://github.com/zhixuany/HUMBI) dataset
+2. Generating new color textures with [Lightweight GAN](https://github.com/lucidrains/lightweight-gan) given the reconstructed UV textures
+
+
+## Demos
+
+Details on how to use **GTA** will soon be provided here.
+
+
+## Installation
+
+Run the following command to install most requirements
+```bash
+$ pip install git+https://github.com/maximeraafat/gta
+```
+and install the below packages
+- PyTorch3D : https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md
+- Detectron2 : https://github.com/facebookresearch/detectron2/blob/main/INSTALL.md
+
+Additionally, clone [SMPL-X](https://github.com/vchoutas/smplx) inside of this repository (```gta/```)
+
+Additionally, clone [Detectron2](https://github.com/facebookresearch/detectron2) (if not already done) inside of this repository (```gta/```).
+```bash
+$ git clone https://github.com/facebookresearch/detectron2.git detectron2_repo
+```
