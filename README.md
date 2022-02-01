@@ -21,9 +21,12 @@ and install the below packages
 - PyTorch3D : https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md
 - Detectron2 : https://github.com/facebookresearch/detectron2/blob/main/INSTALL.md
 
-Additionally, clone [SMPL-X](https://github.com/vchoutas/smplx) inside of this repository (```gta/```)
-
-Additionally, clone [Detectron2](https://github.com/facebookresearch/detectron2) (if not already done) inside of this repository (```gta/```).
+Additionally, clone [Detectron2](https://github.com/facebookresearch/detectron2) (if not already done) inside of this repository (```gta/```)
 ```bash
 $ git clone https://github.com/facebookresearch/detectron2.git detectron2_repo
 ```
+
+## License
+This library is licensed under the MIT License. See the [LICENSE](LICENSE) file.
+
+[//]: # (TODO: ## Structure)
