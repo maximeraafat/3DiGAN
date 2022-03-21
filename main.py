@@ -17,6 +17,8 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('--subjects', default=SUBJECT_IDS,
                     type=str, help='list or range of subject ids as string')
+# if given, length(list of poses) = length(list of subjects) : subject k from 'subjects' list is reconstructed in pose k from 'poses' list
+parser.add_argument('--poses', type=str, help='list of poses of as string')
 parser.add_argument('--gdrive', metavar='PATH', default='', type=str,
                     help='path to google drive (if on colab)')
 parser.add_argument('--iters', metavar='INT', default=30,
@@ -27,6 +29,10 @@ parser.add_argument('--saveobj', action='store_true',
                     help='whether to store neural rendering progress in .obj file every 3 iterations per subject')
 parser.add_argument('--smoothing', action='store_true',
                     help='whether to slightly smooth mesh after learning vertex displacements')
+parser.add_argument('--norm', action='store_true',
+                    help='whether to store normalized displacement maps')
+parser.add_argument('--val', action='store_true',
+                    help='whether to perform validation on the 10% of the data (and leave 10% out for testing)')
 
 args = parser.parse_args()
 
@@ -43,6 +49,11 @@ def main():
 
     subjects = eval(args.subjects)
     assert( isinstance(subjects, list) or isinstance(subjects, range) ), '--subjects needs to be a valid list or range passed as a string'
+
+    if args.poses:
+        poses = eval(args.poses)
+        poses = ['%08d' % p for p in poses]
+        assert( len(subjects) == len(poses) ), '--poses needs to be a list of same length as --subjects, passed as a string'
 
     subdivision = args.subdivision
 
@@ -64,7 +75,7 @@ def main():
     attributes = 'body'
 
     rgb_saved = 0 # count how many rgb textures are saved
-    for subject in subjects:
+    for i, subject in enumerate(subjects):
         # Do not download subject data if it already exists
         exists = os.path.exists('subject_%d' % subject)
         if exists:
@@ -74,13 +85,16 @@ def main():
             loaded = download_subject(subject, [attributes])
 
         if loaded:
-            pose = get_pose(subject, attributes)
+            if args.poses:
+                pose = poses[i]
+            else:
+                pose = get_pose(subject, attributes)
 
             # Neural rendering
             if not subdivision:
-                geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, obj_path, subdivision, rescale_factor=2, save_path=save_path_objs)
+                geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, obj_path, subdivision, rescale_factor=2, save_path=save_path_objs, validation=args.val)
             else:
-                geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, subd_obj_path, subdivision, rescale_factor=2, save_path=save_path_objs)
+                geometry, texture = neural_renderer(smplx_model, subject, pose, args.iters, subd_obj_path, subdivision, rescale_factor=2, save_path=save_path_objs, validation=args.val)
 
             # Extract geometry
             global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale, verts_disps = geometry
@@ -95,7 +109,13 @@ def main():
             rgb_saved += cv2.imwrite(rgb_filename, cv2.cvtColor(nrm_rgb_map, cv2.COLOR_BGR2RGB))
 
             # Save geometry in npz file
+            global_orient = global_orient.cpu().numpy()
+            transl = transl.cpu().numpy()
             body_pose = body_pose.cpu().numpy()
+            left_hand_pose = left_hand_pose.cpu().numpy()
+            right_hand_pose = right_hand_pose.cpu().numpy()
+            jaw_pose = jaw_pose.cpu().numpy()
+            expression = expression.cpu().numpy()
             betas = betas.cpu().numpy()
             scale = scale.cpu().numpy()
             verts_disps = verts_disps.cpu().numpy()
@@ -103,7 +123,7 @@ def main():
 
             os.makedirs(save_path_npz, exist_ok=True)
             geometry_filename = os.path.join(save_path_npz, 'output_subject_%d.npz' % subject)
-            np.savez(geometry_filename, body_pose=body_pose, betas=betas, scale=scale, verts_disps=verts_disps, learned_geometry=learned_geometry)
+            np.savez(geometry_filename, global_orient=global_orient, transl=transl, body_pose=body_pose, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose, jaw_pose=jaw_pose, expression=expression, betas=betas, scale=scale, verts_disps=verts_disps, learned_geometry=learned_geometry)
 
         # do not remove subject data if it already existed
         if not exists and loaded:
@@ -111,11 +131,11 @@ def main():
 
     print('\nhumbi reconstruction done: %d rgb textures saved!' % rgb_saved)
 
-    # Save displacement map as normalized texture (should not be used in 3D software yet, e.g. Blender : denormalize first)
-    # We do this in order to take advantage of all pixel intensities from 0 (smallest displacement) to 255 (biggest displacement)
-    disp_saved = normalize_displacements(subjects, save_path_npz, save_path_geom, obj_path, uv_mask_img)
-
-    print('\n%d displacement textures saved!' % disp_saved)
+    if args.norm:
+        # Save displacement map as normalized texture (should not be used in 3D software yet, e.g. Blender : denormalize first)
+        # We do this in order to take advantage of all pixel intensities from 0 (smallest displacement) to 255 (biggest displacement)
+        disp_saved = normalize_displacements(subjects, save_path_npz, save_path_geom, obj_path, uv_mask_img)
+        print('\n%d displacement textures saved!' % disp_saved)
 
     return
 

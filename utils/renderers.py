@@ -18,7 +18,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 ### Get silhouette and phong renderers
-def get_renderers(cameras, image_size=(360, 640), silh_sigma=1e-7, silh_gamma=1e-1, silh_faces_per_pixel=50, device:torch.device=device):
+def get_renderers(cameras, image_size=(360, 640), silh_sigma=1e-7, silh_gamma=1e-1, silh_faces_per_pixel=50, pointlight=False, device:torch.device=device):
     # Settings for opacity and the sharpness of edges
     blend_params = BlendParams(background_color=(0., 0., 0.), sigma=silh_sigma, gamma=silh_gamma)
 
@@ -47,7 +47,8 @@ def get_renderers(cameras, image_size=(360, 640), silh_sigma=1e-7, silh_gamma=1e
 
     blend_params = BlendParams(background_color=(1., 1., 1.))
     lights = AmbientLights(device=device)
-    # lights = PointLights(device=device, location=((1., 1., -5.),))
+    if pointlight:
+        lights = PointLights(device=device, location=((2., 2., 2.),))
 
     phong_renderer = MeshRenderer(
         rasterizer=MeshRasterizer(

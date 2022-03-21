@@ -20,6 +20,8 @@ from utils.smpl_to_smplx import smpl2smplx
 from utils.camera_calibration import get_camera_parameters
 from utils.renderers import get_renderers
 from utils.pointrend_segmentation import get_pointrend_segmentation
+from utils.validation import get_split, get_cam_idx_split, validation_score
+from utils.vgg_loss import VGGLoss
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -95,20 +97,18 @@ def keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose,
     kpts_filename = 'subject_%d/body/%s/reconstruction/keypoints.txt' % (subject, pose)
     kpts_gt = torch.Tensor( np.loadtxt(kpts_filename)[openpose_kpts_ix] ).to(device) # openpose keypoints ground truth
 
-    l1_loss = torch.nn.L1Loss()
+    l1_loss = torch.nn.L1Loss().to(device)
 
     return l1_loss(kpts_preds, kpts_gt)
 
 
-### Neural rendering
-def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv_path:str, subdivision:bool=False, rescale_factor:int=3, save_path:str=None):
-    ## Segment all photos
+### Get ground truth image and segmentation
+def gt_segmentation(camera_loop, subject, pose, rescale_factor):
     camera_idx_list = []
     silh_photo_list = []
     rgb_photo_list = []
-    print('segment all photos before neural rendering for subject %d' % subject)
-    cam_loop = tqdm(np.random.choice(107, 107, replace=False), total = 107)
-    for camera_idx in cam_loop:
+
+    for camera_idx in camera_loop:
         try:
             # Check if camera exists
             get_camera_parameters(subject, camera_idx)
@@ -132,6 +132,31 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
         camera_idx_list.append(camera_idx)
         silh_photo_list.append(silh_photo)
         rgb_photo_list.append(rgb_photo)
+
+    return camera_idx_list, silh_photo_list, rgb_photo_list
+
+
+### Neural rendering
+def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv_path:str, subdivision:bool=False, rescale_factor:int=3, save_path:str=None, validation:bool=False):
+    # Segment all photos
+    print('segment all photos before neural rendering for subject %d' % subject)
+
+    path_to_imgs = 'subject_%d/body/%s/image' % (subject, pose)
+    train_images, val_images = get_split(path_to_imgs)[:2]
+
+    cam_indices = np.random.choice(107, 107, replace=False)
+    if validation:
+        cam_indices = get_cam_idx_split(train_images, cam_indices)
+        print('training images')
+
+    cam_loop = tqdm(cam_indices, total=len(cam_indices))
+    camera_idx_list, silh_photo_list, rgb_photo_list = gt_segmentation(cam_loop, subject, pose, rescale_factor)
+
+    if validation:
+        val_cam_indices = get_cam_idx_split(val_images, cam_indices)
+        print('validation images')
+        val_cam_loop = tqdm(val_cam_indices, total=len(val_cam_indices))
+        val_camera_idx_list, val_silh_photo_list, val_rgb_photo_list = gt_segmentation(val_cam_loop, subject, pose, rescale_factor)
 
     # uv coordinates
     obj_mesh = load_obj(smplx_uv_path, load_textures=False)
@@ -159,7 +184,10 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
     sched_geom = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_geom, patience=5, threshold=0.1, verbose=True)
     sched_txt = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_txt, patience=5, threshold=0.1, verbose=True)
 
-    l1_loss = torch.nn.L1Loss()
+    l1_loss = torch.nn.L1Loss().to(device)
+    vgg_loss = VGGLoss().to(device)
+
+    add_vgg_loss = False
 
     print('neural rendering for subject %d' % subject)
     loop = tqdm(total = iterations * len(camera_idx_list))
@@ -187,11 +215,16 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
             silh_render = silhouette_render[0, ..., 3]
 
             # Compute loss
-            loss = l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render)
+            loss = l1_loss(rgb_photo_list[k], rgb_render) + l1_loss(silh_photo_list[k], silh_render) # image loss
             loss += 2.0 * mesh_laplacian_smoothing(mesh, method='cot')
             loss += 10.0 * mesh_edge_loss(mesh)
             loss += keypoints_loss(smplx_model, subject, pose, global_orient, transl, body_pose, left_hand_pose, right_hand_pose, jaw_pose, expression, betas, scale)
-            # loss += 0.00000001 * torch.linalg.norm(verts_disps_output)
+
+            if add_vgg_loss:
+                gt_rgb_vgg = torch.movedim(rgb_photo_list[k], 2, 0)
+                rgb_render_vgg = torch.movedim(rgb_render, 2, 0)
+                loss += vgg_loss(gt_rgb_vgg, rgb_render_vgg) + vgg_loss(silh_photo_list[k], silh_render) # perceptual loss
+
             total_loss += float(loss)
 
             # Backpropagate loss
@@ -205,19 +238,32 @@ def neural_renderer(smplx_model, subject:int, pose:str, iterations:int, smplx_uv
             opt_txt.step()
             loop.update(1)
 
-        print('neural rendering total loss for iteration %d : %.6f' % ((i+1), total_loss))
+        print('neural rendering total training loss for iteration %d : %.6f' % ((i+1), total_loss))
         sched_pose_shape.step(total_loss)
         sched_geom.step(total_loss)
         sched_txt.step(total_loss)
+
+        # Validation
+        if validation:
+            score = 0
+            for k, camera_idx in enumerate(val_camera_idx_list):
+                # Validation (TODO : checkout error in utils/validation.py)
+                score += validation_score(val_rgb_photo_list[k], val_silh_photo_list[k], rgb_render, silh_render)
+            print('neural rendering validation score for iteratrion %d : %.6f' % ((i+1), score))
 
         if save_path is not None and i%3 == 0 and i > 0:
             os.makedirs(save_path, exist_ok=True)
             filename = os.path.join(save_path, 'obj_subj_%d_iter_%d.obj' % (subject, i))
             save_obj(filename, verts=mesh.verts_packed(), faces=mesh.faces_packed(), verts_uvs=verts_uvs[0], faces_uvs=faces_uvs[0], texture_map=texture_output[0])
 
+        # Add VGG loss
+        if opt_txt.param_groups[0]['lr'] < 0.1 * txt_lr and not add_vgg_loss:
+            add_vgg_loss = True
+            print('start adding vgg loss')
+
         # Early stopping
         if (opt_geom.param_groups[0]['lr'] < 0.01 * geom_lr) and (opt_txt.param_groups[0]['lr'] < 0.01 * txt_lr):
-            print("early stopping since low learning rate already reached!\n")
+            print('early stopping since low learning rate already reached!\n')
             break
 
     geometry = global_orient.detach(), transl.detach(), body_pose.detach(), left_hand_pose.detach(), right_hand_pose.detach(), jaw_pose.detach(), expression.detach(), betas.detach(), scale.detach(), verts_disps_output.detach()

@@ -8,6 +8,7 @@ import urllib.request as request
 ### Download attributes data for selected subject
 def download_subject(subject:int, attributes:List[str], root_url:str='https://humbi-dataset.s3.amazonaws.com'):
     # possible attributes = ['body', 'body_texture', 'cloth', 'gaze', 'gaze_texture', 'face', 'face_texture', 'hand']
+    output = False
     for attr in attributes:
         part_name = attr + '_subject'
         zip_file = 'subject_%d.zip' % subject
@@ -20,10 +21,12 @@ def download_subject(subject:int, attributes:List[str], root_url:str='https://hu
             downloaded_zip = zipfile.ZipFile(path)
             downloaded_zip.extractall()
             os.remove(path)
-            return True
+            output = True # return True
         except request.HTTPError:
             print('%s attribute is missing for subject %d' % (attr, subject))
             return False
+
+    return output
 
 
 ### Get T-pose for selected subject, or first available if can't be found
