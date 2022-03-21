@@ -29,8 +29,8 @@ parser.add_argument('--saveobj', action='store_true',
                     help='whether to store neural rendering progress in .obj file every 3 iterations per subject')
 parser.add_argument('--smoothing', action='store_true',
                     help='whether to slightly smooth mesh after learning vertex displacements')
-parser.add_argument('--norm', action='store_true',
-                    help='whether to store normalized displacement maps')
+parser.add_argument('--nodisps', action='store_true',
+                    help='disable storing the normalized xyz displacement maps (only rgb textures will be saved)')
 parser.add_argument('--val', action='store_true',
                     help='whether to perform validation on the 10% of the data (and leave 10% out for testing)')
 
@@ -131,7 +131,7 @@ def main():
 
     print('\nhumbi reconstruction done: %d rgb textures saved!' % rgb_saved)
 
-    if args.norm:
+    if args.nodisps:
         # Save displacement map as normalized texture (should not be used in 3D software yet, e.g. Blender : denormalize first)
         # We do this in order to take advantage of all pixel intensities from 0 (smallest displacement) to 255 (biggest displacement)
         disp_saved = normalize_displacements(subjects, save_path_npz, save_path_geom, obj_path, uv_mask_img)
