@@ -44,6 +44,9 @@ EXTS = ['jpg', 'jpeg', 'png']
 
 # helpers
 
+def count_parameters(model, requires_grad=True):
+    return sum( p.numel() for p in model.parameters() if p.requires_grad == requires_grad )
+
 def exists(val):
     return val is not None
 
@@ -96,6 +99,14 @@ def evaluate_in_chunks(max_batch_size, model, *args):
     if len(chunked_outputs) == 1:
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
+
+# linear interpolation
+
+def lerp(val, low, high):
+    res = (1.0 - val) * low + val * high
+    return res
+
+# spherical linear interpolation
 
 def slerp(val, low, high):
     low_norm = low / torch.norm(low, dim=1, keepdim=True)
@@ -458,6 +469,16 @@ class FCANet(nn.Module):
         x = reduce(x * self.dct_weights, 'b c (h h1) (w w1) -> b c h1 w1', 'sum', h1 = 1, w1 = 1)
         return self.net(x)
 
+# fourier feature mapping : https://github.com/tancik/fourier-feature-networks
+# encoding function from equation (6) : https://dl.acm.org/doi/pdf/10.1145/3503250
+
+def fourier_encoding(x, L=8, rank=0):
+    # x.shape = (b, c)
+    basis = 2 ** torch.arange(L).float().unsqueeze(0).cuda(rank) # shape = (1, L)
+    x_proj = x.unsqueeze(-1) @ basis # shape = (b, c, L)
+    mapping = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # shape = (b, c, 2L)
+    return mapping.reshape(x.shape[0], x.shape[1] * L, 2) # shape = (b, Lc, 2)
+
 # generative adversarial network
 
 class Generator(nn.Module):
@@ -471,8 +492,10 @@ class Generator(nn.Module):
         transparent = False,
         greyscale = False,
         rgbxyz = False,
+        styling = False,
         attn_res_layers = [],
-        freq_chan_attn = False
+        freq_chan_attn = False,
+        rank = 0
     ):
         super().__init__()
         resolution = log2(image_size)
@@ -486,6 +509,9 @@ class Generator(nn.Module):
             init_channel = 6
         else:
             init_channel = 3
+
+        if styling:
+            latent_dim = 64
 
         fmap_max = default(fmap_max, latent_dim)
 
@@ -503,6 +529,8 @@ class Generator(nn.Module):
 
         in_out_features = list(zip(features[:-1], features[1:]))
 
+        self.rank = rank
+        self.styling = styling
         self.res_layers = range(2, num_layers + 2)
         self.layers = nn.ModuleList([])
         self.res_to_feature_map = dict(zip(self.res_layers, in_out_features))
@@ -512,6 +540,8 @@ class Generator(nn.Module):
         self.sle_map = dict(self.sle_map)
 
         self.num_layers_spatial_res = 1
+
+        self.style_sizes = (latent_dim, 512, 512, 256, 128, 64, 32, 3)
 
         for (res, (chan_in, chan_out)) in zip(self.res_layers, in_out_features):
             image_width = 2 ** res
@@ -552,7 +582,25 @@ class Generator(nn.Module):
 
         self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
 
-    def forward(self, x):
+    def forward(self, latent_z):
+        if self.styling:
+            # constant feature vector, on which we will apply styling from latent w
+            x = torch.ones_like(latent_z).cuda(self.rank)
+
+            # fourier encoding of latent input
+            latent_w = fourier_encoding(latent_z, L=8, rank=self.rank).cuda(self.rank) # shape = (b, 2c, 2) -> batch size, 512 features (2*256), style and bias
+
+            styles = {}
+            biases = {}
+
+            for k, size in enumerate(self.style_sizes):
+                # example : for size = 128, vector of shape (b, 128, 1, 1)
+                styles['s%d' % (k+2)] = rearrange(latent_w[:,:size, 0], 'b c -> b c () ()')
+                biases['b%d' % (k+2)] = rearrange(latent_w[:,:size, 1], 'b c -> b c () ()')
+
+        else:
+            x = latent_z
+
         x = rearrange(x, 'b c -> b c () ()')
         x = self.initial_conv(x)
         x = F.normalize(x, dim = 1)
@@ -562,6 +610,14 @@ class Generator(nn.Module):
         for (res, (up, sle, attn)) in zip(self.res_layers, self.layers):
             if exists(attn):
                 x = attn(x) + x
+
+            if self.styling:
+                # add scaled normally distributed noise (mean=0, std=0.1)
+                x = x + torch.randn(x.shape).cuda(self.rank) * 0.1
+
+                # AdaIN as in StylePeople
+                x = F.normalize(x, dim = 1)
+                x = styles['s%d' % res] * x + biases['b%d' % res]
 
             x = up(x)
 
@@ -792,6 +848,7 @@ class LightweightGAN(nn.Module):
         transparent = False,
         greyscale = False,
         rgbxyz = False,
+        styling = False,
         disc_output_size = 5,
         attn_res_layers = [],
         freq_chan_attn = False,
@@ -812,8 +869,10 @@ class LightweightGAN(nn.Module):
             transparent = transparent,
             greyscale = greyscale,
             rgbxyz = rgbxyz,
+            styling = styling,
             attn_res_layers = attn_res_layers,
-            freq_chan_attn = freq_chan_attn
+            freq_chan_attn = freq_chan_attn,
+            rank = rank
         )
 
         self.G = Generator(**G_kwargs)
@@ -889,6 +948,7 @@ class Trainer():
         transparent = False,
         greyscale = False,
         rgbxyz = False,
+        styling = False,
         batch_size = 4,
         gp_weight = 10,
         gradient_accumulate_every = 1,
@@ -938,10 +998,14 @@ class Trainer():
         self.num_image_tiles = num_image_tiles
 
         self.latent_dim = latent_dim
+        if styling:
+            self.latent_dim = 64
+
         self.fmap_max = fmap_max
         self.transparent = transparent
         self.greyscale = greyscale
         self.rgbxyz = rgbxyz
+        self.styling = styling
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
 
@@ -1038,6 +1102,7 @@ class Trainer():
             transparent = self.transparent,
             greyscale = self.greyscale,
             rgbxyz = self.rgbxyz,
+            styling = self.styling,
             rank = self.rank,
             *args,
             **kwargs
@@ -1050,6 +1115,9 @@ class Trainer():
             self.D_ddp = DDP(self.GAN.D, **ddp_kwargs)
             self.D_aug_ddp = DDP(self.GAN.D_aug, **ddp_kwargs)
 
+        print('\nnumber of learnable model parameters : %d' % count_parameters(self.GAN, True))
+        print('number of frozen model parameters : %d\n' % count_parameters(self.GAN, False))
+
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config()))
 
@@ -1061,6 +1129,7 @@ class Trainer():
         self.disc_output_size = config['disc_output_size']
         self.greyscale = config.pop('greyscale', False)
         self.rgbxyz = config.pop('rgbxyz', False)
+        self.styling = config.pop('styling', False)
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
         self.optimizer = config.pop('optimizer', 'adam')
@@ -1074,6 +1143,7 @@ class Trainer():
             'transparent': self.transparent,
             'greyscale': self.greyscale,
             'rgbxyz': self.rgbxyz,
+            'styling': self.styling,
             'syncbatchnorm': self.syncbatchnorm,
             'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
@@ -1269,7 +1339,7 @@ class Trainer():
         self.steps += 1
 
     @torch.no_grad()
-    def evaluate(self, num = 0, num_image_tiles = 4):
+    def evaluate(self, num=0, num_image_tiles=4):
         self.GAN.eval()
 
         ext = self.image_extension
@@ -1446,7 +1516,6 @@ class Trainer():
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
-    def generate_interpolation(self, num = 0, num_image_tiles = 8, num_steps = 100, save_frames = False):
         self.GAN.eval()
         ext = self.image_extension
         num_rows = num_image_tiles
