@@ -587,6 +587,8 @@ class Generator(nn.Module):
             # constant feature vector, on which we will apply styling from latent w
             x = torch.ones_like(latent_z).cuda(self.rank)
 
+            latent_z = F.normalize(latent_z, dim = 1)
+
             # fourier encoding of latent input
             latent_w = fourier_encoding(latent_z, L=8, rank=self.rank).cuda(self.rank) # shape = (b, 2c, 2) -> batch size, 512 features (2*256), style and bias
 
@@ -612,11 +614,15 @@ class Generator(nn.Module):
                 x = attn(x) + x
 
             if self.styling:
-                # add scaled normally distributed noise (mean=0, std=0.1)
+                # add scaled normally distributed noise
                 x = x + torch.randn(x.shape).cuda(self.rank) * 0.1
 
-                # AdaIN as in StylePeople
-                x = F.normalize(x, dim = 1)
+                # x.shape = (b, c, w, h) -> mean/std shape = (b, w, h) -> rearranged shape = (b, 1, w, h)
+                mean = rearrange(x.mean(dim=1), 'b w h -> b () w h')
+                std = rearrange(x.std(dim=1), 'b w h -> b () w h')
+
+                # AdaIN as in StylePeople (adaptive instance normalization)
+                x = (x - mean) / std
                 x = styles['s%d' % res] * x + biases['b%d' % res]
 
             x = up(x)

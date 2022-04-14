@@ -91,7 +91,7 @@ def train_from_folder(
     greyscale = False,
     rgbxyz = False,
     styling = False,
-    batch_size = 10,
+    batch_size = 8,
     gradient_accumulate_every = 4,
     num_train_steps = 150000,
     learning_rate = 2e-4,
