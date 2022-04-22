@@ -91,6 +91,8 @@ def train_from_folder(
     greyscale = False,
     rgbxyz = False,
     styling = False,
+    fourier = False,
+    latent_dim = 256,
     batch_size = 8,
     gradient_accumulate_every = 4,
     num_train_steps = 150000,
@@ -110,6 +112,8 @@ def train_from_folder(
     dual_contrast_loss = False,
     antialias = False,
     interpolation_num_steps = 100,
+    lerp = False,
+    interp_along_axis = False,
     save_frames = False,
     num_image_tiles = None,
     num_workers = None,
@@ -143,6 +147,8 @@ def train_from_folder(
         greyscale = greyscale,
         rgbxyz = rgbxyz,
         styling = styling,
+        fourier = fourier,
+        latent_dim = latent_dim,
         lr = learning_rate,
         save_every = save_every,
         evaluate_every = evaluate_every,
@@ -168,7 +174,12 @@ def train_from_folder(
         model = Trainer(**model_args)
         model.load(load_from)
         samples_name = timestamped_filename()
-        model.generate_interpolation(samples_name, num_image_tiles, num_steps = interpolation_num_steps, save_frames = save_frames)
+
+        string_slerp = 'spherical '
+        string_along_axis = ', interpolated along latent axes'
+        print( 'use %slinear interpolation%s' % ((not lerp) * string_slerp, interp_along_axis * string_along_axis) )
+
+        model.generate_interpolation(samples_name, num_image_tiles, num_steps=interpolation_num_steps, slerp_interp=(not lerp), along_axis=interp_along_axis, save_frames=save_frames)
         print(f'interpolation generated at {results_dir}/{name}/{samples_name}')
         return
 

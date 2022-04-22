@@ -33,16 +33,16 @@ from einops import rearrange, reduce, repeat
 
 from adabelief_pytorch import AdaBelief
 
-# asserts
 
-assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
+# warnings
+if not torch.cuda.is_available():
+    print('WARNING: we highly recommend running this code on an Nvidia GPU with CUDA!\n')
 
 # constants
-
 NUM_CORES = multiprocessing.cpu_count()
 EXTS = ['jpg', 'jpeg', 'png']
 
-# helpers
+## helpers
 
 def count_parameters(model, requires_grad=True):
     return sum( p.numel() for p in model.parameters() if p.requires_grad == requires_grad )
@@ -101,13 +101,11 @@ def evaluate_in_chunks(max_batch_size, model, *args):
     return torch.cat(chunked_outputs, dim=0)
 
 # linear interpolation
-
 def lerp(val, low, high):
     res = (1.0 - val) * low + val * high
     return res
 
 # spherical linear interpolation
-
 def slerp(val, low, high):
     low_norm = low / torch.norm(low, dim=1, keepdim=True)
     high_norm = high / torch.norm(high, dim=1, keepdim=True)
@@ -124,7 +122,7 @@ def safe_div(n, d):
         res = float(f'{prefix}inf')
     return res
 
-# loss functions
+## loss functions
 
 def gen_hinge_loss(fake, real):
     return fake.mean()
@@ -144,7 +142,8 @@ def dual_contrastive_loss(real_logits, fake_logits):
 
     return loss_half(real_logits, fake_logits) + loss_half(-fake_logits, -real_logits)
 
-# helper classes
+
+## helper classes
 
 class NanException(Exception):
     pass
@@ -214,7 +213,8 @@ class Blur(nn.Module):
         f = f[None, None, :] * f [None, :, None]
         return filter2d(x, f, normalized=True)
 
-# attention
+
+## attention
 
 class DepthWiseConv2d(nn.Module):
     def __init__(self, dim_in, dim_out, kernel_size, padding = 0, stride = 1, bias = True):
@@ -255,7 +255,8 @@ class LinearAttention(nn.Module):
         out = self.nonlin(out)
         return self.to_out(out)
 
-# dataset
+
+## dataset
 
 def convert_image_to(img_type, image):
     if image.mode != img_type:
@@ -363,7 +364,8 @@ class ImageDataset(Dataset):
         else:
             return self.transform(img)
 
-# augmentations
+
+## augmentations
 
 def random_hflip(tensor, prob):
     if prob > random():
@@ -386,18 +388,16 @@ class AugWrapper(nn.Module):
         return self.D(images, **kwargs)
 
 # modifiable global variables
-
 norm_class = nn.BatchNorm2d
 
 def upsample(scale_factor = 2):
     return nn.Upsample(scale_factor = scale_factor)
 
-# squeeze excitation classes
+## squeeze excitation classes
 
 # global context network
 # https://arxiv.org/abs/2012.13375
 # similar to squeeze-excite, but with a simplified attention pooling and a subsequent layer norm
-
 class GlobalContext(nn.Module):
     def __init__(
         self,
@@ -469,17 +469,8 @@ class FCANet(nn.Module):
         x = reduce(x * self.dct_weights, 'b c (h h1) (w w1) -> b c h1 w1', 'sum', h1 = 1, w1 = 1)
         return self.net(x)
 
-# fourier feature mapping : https://github.com/tancik/fourier-feature-networks
-# encoding function from equation (6) : https://dl.acm.org/doi/pdf/10.1145/3503250
 
-def fourier_encoding(x, L=8, rank=0):
-    # x.shape = (b, c)
-    basis = 2 ** torch.arange(L).float().unsqueeze(0).cuda(rank) # shape = (1, L)
-    x_proj = x.unsqueeze(-1) @ basis # shape = (b, c, L)
-    mapping = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # shape = (b, c, 2L)
-    return mapping.reshape(x.shape[0], x.shape[1] * L, 2) # shape = (b, Lc, 2)
-
-# generative adversarial network
+## generative adversarial network
 
 class Generator(nn.Module):
     def __init__(
@@ -493,6 +484,7 @@ class Generator(nn.Module):
         greyscale = False,
         rgbxyz = False,
         styling = False,
+        fourier = False,
         attn_res_layers = [],
         freq_chan_attn = False,
         rank = 0
@@ -510,8 +502,16 @@ class Generator(nn.Module):
         else:
             init_channel = 3
 
+        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+
+        self.styling = styling
+        self.fourier = fourier
+        self.basis_dim = 256 // (latent_dim * 2) # basis dim in fourier decomposition such that we have a ~256D latent after decomposition
+
         if styling:
-            latent_dim = 64
+            latent_dim = 64 # for styling we need a latent space of shape 1024 (weight 512 + bias 512) = 64 * 8 * 2
+        elif fourier:
+            latent_dim = self.basis_dim * latent_dim * 2 # if we perform fourier decomposition, we change the latent dimension
 
         fmap_max = default(fmap_max, latent_dim)
 
@@ -529,8 +529,6 @@ class Generator(nn.Module):
 
         in_out_features = list(zip(features[:-1], features[1:]))
 
-        self.rank = rank
-        self.styling = styling
         self.res_layers = range(2, num_layers + 2)
         self.layers = nn.ModuleList([])
         self.res_to_feature_map = dict(zip(self.res_layers, in_out_features))
@@ -582,30 +580,55 @@ class Generator(nn.Module):
 
         self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
 
-    def forward(self, latent_z):
+    # fourier feature mapping : https://github.com/tancik/fourier-feature-networks
+    # encoding function from equation (6) : https://dl.acm.org/doi/pdf/10.1145/3503250
+    def fourier_encoding(self, x, L=8):
+        # x.shape = (b, c)
+        basis = 2 ** torch.arange(L).float().unsqueeze(0).to(self.device) # shape = (1, L)
+        x_proj = x.unsqueeze(-1) @ basis # shape = (b, c, L)
+        mapping = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # shape = (b, c, 2L)
+        return mapping.reshape(x.shape[0], x.shape[1] * L, 2) # shape = (b, Lc, 2)
+
+    # latent mapping f : Z -> W
+    def latent_mapping(self, old_latent):
+        # constant feature vector, on which we will apply styling from latent w
+        const = torch.ones_like(old_latent).to(self.device)
+
+        old_latent = F.normalize(old_latent, dim=1)
+
+        # fourier encoding of latent input
+        new_latent = self.fourier_encoding(old_latent, L=8).to(self.device) # shape = (b, 2c, 2) -> batch size, 512 features (2*256), style and bias
+
+
+        styles = {}
+        biases = {}
+
+        for k, size in enumerate(self.style_sizes):
+            # example : for size = 128, vector of shape (b, 128, 1, 1)
+            styles['s%d' % (k+2)] = rearrange(new_latent[:,:size, 0], 'b c -> b c () ()')
+            biases['b%d' % (k+2)] = rearrange(new_latent[:,:size, 1], 'b c -> b c () ()')
+
+        return const, old_latent, new_latent, styles, biases
+
+    def forward(self, latent):
         if self.styling:
-            # constant feature vector, on which we will apply styling from latent w
-            x = torch.ones_like(latent_z).cuda(self.rank)
+            x, latent_z, latent_w, styles, biases = self.latent_mapping(latent)
 
-            latent_z = F.normalize(latent_z, dim = 1)
+            # second latent for style mixing regularization as in StyleGAN
+            latent2 = torch.randn_like(latent).to(self.device)
+            styles2, biases2 = self.latent_mapping(latent2)[-2:]
+            mixing = False
 
-            # fourier encoding of latent input
-            latent_w = fourier_encoding(latent_z, L=8, rank=self.rank).cuda(self.rank) # shape = (b, 2c, 2) -> batch size, 512 features (2*256), style and bias
-
-            styles = {}
-            biases = {}
-
-            for k, size in enumerate(self.style_sizes):
-                # example : for size = 128, vector of shape (b, 128, 1, 1)
-                styles['s%d' % (k+2)] = rearrange(latent_w[:,:size, 0], 'b c -> b c () ()')
-                biases['b%d' % (k+2)] = rearrange(latent_w[:,:size, 1], 'b c -> b c () ()')
+        elif self.fourier:
+            x = self.fourier_encoding(latent, L=self.basis_dim).to(self.device)
+            x = x.reshape(x.shape[0], -1)
 
         else:
-            x = latent_z
+            x = latent
 
         x = rearrange(x, 'b c -> b c () ()')
         x = self.initial_conv(x)
-        x = F.normalize(x, dim = 1)
+        x = F.normalize(x, dim=1)
 
         residuals = dict()
 
@@ -615,13 +638,19 @@ class Generator(nn.Module):
 
             if self.styling:
                 # add scaled normally distributed noise
-                x = x + torch.randn(x.shape).cuda(self.rank) * 0.1
+                x = x + torch.randn(x.shape).to(self.device) * 0.01
 
                 # x.shape = (b, c, w, h) -> mean/std shape = (b, w, h) -> rearranged shape = (b, 1, w, h)
                 mean = rearrange(x.mean(dim=1), 'b w h -> b () w h')
                 std = rearrange(x.std(dim=1), 'b w h -> b () w h')
 
-                # AdaIN as in StylePeople (adaptive instance normalization)
+                # perform style mixing regularization with certain probability if not mixed on a previous layer already
+                if torch.rand(1).item() < 0.5 and not mixing:
+                    styles = styles2
+                    biases = biases2
+                    mixing = True
+
+                # AdaIN as in StyleGAN (adaptive instance normalization)
                 x = (x - mean) / std
                 x = styles['s%d' % res] * x + biases['b%d' % res]
 
@@ -855,6 +884,7 @@ class LightweightGAN(nn.Module):
         greyscale = False,
         rgbxyz = False,
         styling = False,
+        fourier = False,
         disc_output_size = 5,
         attn_res_layers = [],
         freq_chan_attn = False,
@@ -867,6 +897,8 @@ class LightweightGAN(nn.Module):
         self.latent_dim = latent_dim
         self.image_size = image_size
 
+        device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+
         G_kwargs = dict(
             image_size = image_size,
             latent_dim = latent_dim,
@@ -876,6 +908,7 @@ class LightweightGAN(nn.Module):
             greyscale = greyscale,
             rgbxyz = rgbxyz,
             styling = styling,
+            fourier = fourier,
             attn_res_layers = attn_res_layers,
             freq_chan_attn = freq_chan_attn,
             rank = rank
@@ -898,7 +931,6 @@ class LightweightGAN(nn.Module):
         self.GE = Generator(**G_kwargs)
         set_requires_grad(self.GE, False)
 
-
         if optimizer == "adam":
             self.G_opt = Adam(self.G.parameters(), lr = lr, betas=(0.5, 0.9))
             self.D_opt = Adam(self.D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
@@ -911,7 +943,7 @@ class LightweightGAN(nn.Module):
         self.apply(self._init_weights)
         self.reset_parameter_averaging()
 
-        self.cuda(rank)
+        self.to(device)
         self.D_aug = AugWrapper(self.D, image_size)
 
     def _init_weights(self, m):
@@ -936,8 +968,8 @@ class LightweightGAN(nn.Module):
     def forward(self, x):
         raise NotImplemented
 
-# trainer
 
+# trainer
 class Trainer():
     def __init__(
         self,
@@ -955,6 +987,7 @@ class Trainer():
         greyscale = False,
         rgbxyz = False,
         styling = False,
+        fourier = False,
         batch_size = 4,
         gp_weight = 10,
         gradient_accumulate_every = 1,
@@ -1012,6 +1045,7 @@ class Trainer():
         self.greyscale = greyscale
         self.rgbxyz = rgbxyz
         self.styling = styling
+        self.fourier = fourier
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
 
@@ -1058,6 +1092,7 @@ class Trainer():
         self.is_main = rank == 0
         self.rank = rank
         self.world_size = world_size
+        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         self.syncbatchnorm = is_ddp
 
@@ -1077,7 +1112,6 @@ class Trainer():
         args, kwargs = self.GAN_params
 
         # set some global variables before instantiating GAN
-
         global norm_class
         global Blur
 
@@ -1086,7 +1120,6 @@ class Trainer():
 
         # handle bugs when
         # switching from multi-gpu back to single gpu
-
         if self.syncbatchnorm and not self.is_ddp:
             import torch.distributed as dist
             os.environ['MASTER_ADDR'] = 'localhost'
@@ -1094,7 +1127,6 @@ class Trainer():
             dist.init_process_group('nccl', rank=0, world_size=1)
 
         # instantiate GAN
-
         self.GAN = LightweightGAN(
             optimizer=self.optimizer,
             lr = self.lr,
@@ -1109,6 +1141,7 @@ class Trainer():
             greyscale = self.greyscale,
             rgbxyz = self.rgbxyz,
             styling = self.styling,
+            fourier = self.fourier,
             rank = self.rank,
             *args,
             **kwargs
@@ -1136,6 +1169,7 @@ class Trainer():
         self.greyscale = config.pop('greyscale', False)
         self.rgbxyz = config.pop('rgbxyz', False)
         self.styling = config.pop('styling', False)
+        self.fourier = config.pop('fourier', False)
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
         self.optimizer = config.pop('optimizer', 'adam')
@@ -1150,6 +1184,7 @@ class Trainer():
             'greyscale': self.greyscale,
             'rgbxyz': self.rgbxyz,
             'styling': self.styling,
+            'fourier': self.fourier,
             'syncbatchnorm': self.syncbatchnorm,
             'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
@@ -1172,14 +1207,13 @@ class Trainer():
 
     def train(self):
         assert exists(self.loader), 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
-        device = torch.device(f'cuda:{self.rank}')
 
         if not exists(self.GAN):
             self.init_GAN()
 
         self.GAN.train()
-        total_disc_loss = torch.zeros([], device=device)
-        total_gen_loss = torch.zeros([], device=device)
+        total_disc_loss = torch.zeros([], device=self.device)
+        total_gen_loss = torch.zeros([], device=self.device)
 
         batch_size = math.ceil(self.batch_size / self.world_size)
 
@@ -1197,22 +1231,19 @@ class Trainer():
         apply_gradient_penalty = self.steps % 4 == 0
 
         # amp related contexts and functions
-
         amp_context = autocast if self.amp else null_context
 
         # discriminator loss fn
-
         if self.dual_contrast_loss:
             D_loss_fn = dual_contrastive_loss
         else:
             D_loss_fn = hinge_loss
 
         # train discriminator
-
         self.GAN.D_opt.zero_grad()
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D_aug, G]):
-            latents = torch.randn(batch_size, latent_dim).cuda(self.rank)
-            image_batch = next(self.loader).cuda(self.rank)
+            latents = torch.randn(batch_size, latent_dim).to(self.device)
+            image_batch = next(self.loader).to(self.device)
             image_batch.requires_grad_()
 
             with amp_context():
@@ -1267,7 +1298,6 @@ class Trainer():
         self.D_scaler.update()
 
         # generator loss fn
-
         if self.dual_contrast_loss:
             G_loss_fn = dual_contrastive_loss
             G_requires_calc_real = True
@@ -1276,14 +1306,13 @@ class Trainer():
             G_requires_calc_real = False
 
         # train generator
-
         self.GAN.G_opt.zero_grad()
 
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D_aug]):
-            latents = torch.randn(batch_size, latent_dim).cuda(self.rank)
+            latents = torch.randn(batch_size, latent_dim).to(self.device)
 
             if G_requires_calc_real:
-                image_batch = next(self.loader).cuda(self.rank)
+                image_batch = next(self.loader).to(self.device)
                 image_batch.requires_grad_()
 
             with amp_context():
@@ -1307,7 +1336,7 @@ class Trainer():
         self.G_scaler.step(self.GAN.G_opt)
         self.G_scaler.update()
 
-        # calculate moving averages
+        ## calculate moving averages
 
         if self.is_main and self.steps % 10 == 0 and self.steps > 20000:
             self.GAN.EMA()
@@ -1316,7 +1345,6 @@ class Trainer():
             self.GAN.reset_parameter_averaging()
 
         # save from NaN errors
-
         if any(torch.isnan(l) for l in (total_gen_loss, total_disc_loss)):
             print(f'NaN detected for generator or discriminator. Loading from checkpoint #{self.checkpoint_num}')
             self.load(self.checkpoint_num)
@@ -1326,7 +1354,6 @@ class Trainer():
         del total_gen_loss
 
         # periodically save results
-
         if self.is_main:
             if self.steps % self.save_every == 0:
                 self.save(self.checkpoint_num)
@@ -1355,11 +1382,9 @@ class Trainer():
         image_size = self.GAN.image_size
 
         # latents and noise
-
-        latents = torch.randn((num_rows ** 2, latent_dim)).cuda(self.rank)
+        latents = torch.randn((num_rows ** 2, latent_dim)).to(self.device)
 
         # regular
-
         generated_images = self.generate_(self.GAN.G, latents)
 
         if self.rgbxyz:
@@ -1369,7 +1394,6 @@ class Trainer():
             torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
 
         # moving averages
-
         generated_images = self.generate_(self.GAN.GE, latents)
         if self.rgbxyz:
             torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb-ema.{ext}'), nrow=num_rows)
@@ -1392,7 +1416,7 @@ class Trainer():
         # regular
         if 'default' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated default images'):
-                latents = torch.randn((1, latent_dim)).cuda(self.rank)
+                latents = torch.randn((1, latent_dim)).to(self.device)
                 generated_image = self.generate_(self.GAN.G, latents)
                 if self.rgbxyz:
                     path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rgb.{ext}')
@@ -1406,7 +1430,7 @@ class Trainer():
         # moving averages
         if 'ema' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated EMA images'):
-                latents = torch.randn((1, latent_dim)).cuda(self.rank)
+                latents = torch.randn((1, latent_dim)).to(self.device)
                 generated_image = self.generate_(self.GAN.GE, latents)
                 if self.rgbxyz:
                     path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rgb-ema.{ext}')
@@ -1439,7 +1463,7 @@ class Trainer():
             self.GAN.eval()
 
             if checkpoint == 0:
-                latents = torch.randn((num_images, self.GAN.latent_dim)).cuda(self.rank)
+                latents = torch.randn((num_images, self.GAN.latent_dim)).to(self.device)
 
             # regular
             if 'default' in types:
@@ -1488,7 +1512,7 @@ class Trainer():
                     else:
                         torchvision.utils.save_image(image, real_path / f'{ind}.png')
 
-        # generate a bunch of fake images in results / name / fid_fake
+        ## generate a bunch of fake images in results / name / fid_fake
 
         rmtree(fake_path, ignore_errors=True)
         os.makedirs(fake_path)
@@ -1501,7 +1525,7 @@ class Trainer():
 
         for batch_num in tqdm(range(num_batches), desc='calculating FID - saving generated'):
             # latents and noise
-            latents = torch.randn(self.batch_size, latent_dim).cuda(self.rank)
+            latents = torch.randn(self.batch_size, latent_dim).to(self.device)
 
             # moving averages
             generated_images = self.generate_(self.GAN.GE, latents)
@@ -1522,6 +1546,7 @@ class Trainer():
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
+    def generate_interpolation(self, num=0, num_image_tiles=8, num_steps=100, slerp_interp=True, along_axis=False, save_frames=False):
         self.GAN.eval()
         ext = self.image_extension
         num_rows = num_image_tiles
@@ -1530,15 +1555,27 @@ class Trainer():
         image_size = self.GAN.image_size
 
         # latents and noise
+        latents_low = torch.randn(num_rows ** 2, latent_dim).to(self.device)
+        latents_high = torch.randn(num_rows ** 2, latent_dim).to(self.device)
 
-        latents_low = torch.randn(num_rows ** 2, latent_dim).cuda(self.rank)
-        latents_high = torch.randn(num_rows ** 2, latent_dim).cuda(self.rank)
+        if along_axis:
+            assert num_rows ** 2 < latent_dim, "can't have more tiles than features in the latent space (for num_image_tiles=%d, we would display %d*%d=%d tiles, for a latent dimension of %d), decrease num_image_tile"  % (num_rows, num_rows, num_rows, num_rows**2, latent_dim)
+
+            latents_high = latents_low.clone()
+            for tile in range(num_rows ** 2):
+                latents_low[tile, tile * int(latent_dim / (num_rows ** 2))] = -5.0
+                latents_high[tile, tile * int(latent_dim / (num_rows ** 2))] = 5.0
 
         ratios = torch.linspace(0., 8., num_steps)
 
         frames = []
         for ratio in tqdm(ratios):
-            interp_latents = slerp(ratio, latents_low, latents_high)
+            # default interpolation method is SLERP, othwerwise use LERP
+            if slerp_interp:
+                interp_latents = slerp(ratio, latents_low, latents_high)
+            else:
+                interp_latents = lerp(ratio, latents_low, latents_high)
+
             generated_images = self.generate_(self.GAN.GE, interp_latents)
             images_grid = torchvision.utils.make_grid(generated_images, nrow = num_rows)
             pil_image = transforms.ToPILImage()(images_grid.cpu())

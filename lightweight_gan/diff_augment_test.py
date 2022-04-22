@@ -11,9 +11,6 @@ from torch.utils.data import DataLoader
 from lightweight_gan import AugWrapper, ImageDataset
 
 
-assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
-
-
 class DummyModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -24,6 +21,8 @@ class DummyModel(nn.Module):
 
 @torch.no_grad()
 def DiffAugmentTest(image_size = 256, data = './data/0.jpg', types = [], batch_size = 10, rank = 0, nrow = 5):
+    device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+
     model = DummyModel()
     aug_wrapper = AugWrapper(model, image_size)
 
@@ -40,7 +39,7 @@ def DiffAugmentTest(image_size = 256, data = './data/0.jpg', types = [], batch_s
             dataset = ImageDataset(directory, image_size, aug_prob=0)
             dataloader = DataLoader(dataset, batch_size=batch_size)
 
-            image_batch = next(iter(dataloader)).cuda(rank)
+            image_batch = next(iter(dataloader)).to(device)
             images_augment = aug_wrapper(images=image_batch, prob=1, types=types, detach=True)
 
             save_result = file_name + f'_augs{ext}'
