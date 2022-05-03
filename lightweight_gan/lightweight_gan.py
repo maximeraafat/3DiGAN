@@ -25,6 +25,7 @@ import torchvision
 from torchvision import transforms
 from kornia import filter2d
 
+from siren import Siren
 from diff_augment import DiffAugment
 from version import __version__
 
@@ -93,9 +94,9 @@ def gradient_accumulate_contexts(gradient_accumulate_every, is_ddp, ddps):
         with context():
             yield
 
-def evaluate_in_chunks(max_batch_size, model, *args):
+def evaluate_in_chunks(max_batch_size, model, nomixing, *args):
     split_args = list(zip(*list(map(lambda x: x.split(max_batch_size, dim=0), args))))
-    chunked_outputs = [model(*i) for i in split_args]
+    chunked_outputs = [model(*i, nomixing=nomixing) for i in split_args]
     if len(chunked_outputs) == 1:
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
@@ -506,11 +507,9 @@ class Generator(nn.Module):
 
         self.styling = styling
         self.fourier = fourier
-        self.basis_dim = 256 // (latent_dim * 2) # basis dim in fourier decomposition such that we have a ~256D latent after decomposition
 
-        if styling:
-            latent_dim = 64 # for styling we need a latent space of shape 1024 (weight 512 + bias 512) = 64 * 8 * 2
-        elif fourier:
+        if fourier:
+            self.basis_dim = 256 // (latent_dim * 2) # basis dim in fourier decomposition such that we have a ~256D latent after decomposition
             latent_dim = self.basis_dim * latent_dim * 2 # if we perform fourier decomposition, we change the latent dimension
 
         fmap_max = default(fmap_max, latent_dim)
@@ -578,6 +577,8 @@ class Generator(nn.Module):
             ])
             self.layers.append(layer)
 
+        # bijective SIREN mapping (input dimension = output dimension = hidden layers dimension)
+        self.siren = Siren(in_features = latent_dim, out_features = latent_dim, hidden_features = latent_dim, hidden_layers = 2, outermost_linear = True)
         self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
 
     # fourier feature mapping : https://github.com/tancik/fourier-feature-networks
@@ -591,33 +592,40 @@ class Generator(nn.Module):
 
     # latent mapping f : Z -> W
     def latent_mapping(self, old_latent):
-        # constant feature vector, on which we will apply styling from latent w
-        const = torch.ones_like(old_latent).to(self.device)
-
         old_latent = F.normalize(old_latent, dim=1)
+        new_latent = self.siren(old_latent)[0].to(self.device) # latent space SIREN mapping
+        return old_latent, new_latent
 
-        # fourier encoding of latent input
-        new_latent = self.fourier_encoding(old_latent, L=8).to(self.device) # shape = (b, 2c, 2) -> batch size, 512 features (2*256), style and bias
-
+    # get style from latent via learned affine transformation
+    def get_styles(self, latent):
+        output = self.fourier_encoding(latent, L=2).to(self.device)
 
         styles = {}
         biases = {}
-
         for k, size in enumerate(self.style_sizes):
             # example : for size = 128, vector of shape (b, 128, 1, 1)
-            styles['s%d' % (k+2)] = rearrange(new_latent[:,:size, 0], 'b c -> b c () ()')
-            biases['b%d' % (k+2)] = rearrange(new_latent[:,:size, 1], 'b c -> b c () ()')
+            styles['s%d' % (k+2)] = rearrange(output[:,:size, 0], 'b c -> b c () ()')
+            biases['b%d' % (k+2)] = rearrange(output[:,:size, 1], 'b c -> b c () ()')
 
-        return const, old_latent, new_latent, styles, biases
+        return styles, biases
 
-    def forward(self, latent):
+    def forward(self, latent, nomapping=False, nomixing=False):
+        # styling a constant vector as in StyleGAN
         if self.styling:
-            x, latent_z, latent_w, styles, biases = self.latent_mapping(latent)
+            # constant vector, on which we will apply styling from latent
+            x = torch.ones_like(latent).to(self.device)
 
-            # second latent for style mixing regularization as in StyleGAN
-            latent2 = torch.randn_like(latent).to(self.device)
-            styles2, biases2 = self.latent_mapping(latent2)[-2:]
-            mixing = False
+            if not nomapping:
+                latent = self.latent_mapping(latent)[-1]
+
+            styles, biases = self.get_styles(latent)
+
+            # second latent for style mixing regularization
+            mixing = nomixing
+            if not nomixing:
+                latent2 = torch.randn_like(latent).to(self.device)
+                latent2 = self.latent_mapping(latent2)[-1]
+                styles2, biases2 = self.get_styles(latent2)
 
         elif self.fourier:
             x = self.fourier_encoding(latent, L=self.basis_dim).to(self.device)
@@ -1037,8 +1045,6 @@ class Trainer():
         self.num_image_tiles = num_image_tiles
 
         self.latent_dim = latent_dim
-        if styling:
-            self.latent_dim = 64
 
         self.fmap_max = fmap_max
         self.transparent = transparent
@@ -1542,7 +1548,7 @@ class Trainer():
 
     @torch.no_grad()
     def generate_(self, G, style, num_image_tiles = 8):
-        generated_images = evaluate_in_chunks(self.batch_size, G, style)
+        generated_images = evaluate_in_chunks(self.batch_size, G, True, style) # no style mixing regularization (nomixing=True) during evaluation
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
