@@ -1,31 +1,45 @@
-### SETUP FOR GTA
-
 import sys
 from setuptools import setup, find_packages
 
+sys.path[0:0] = ['lightweight_gan']
+from version import __version__
+
 setup(
-    name = "gta",
-    version = 1.0,
-    packages = find_packages(),
-    license = 'MIT',
-    description="Generated Textured Avatars (GTA)",
-    author = 'Maxime Raafat',
-    author_email = 'raafatm@student.ethz.ch',
-    url = 'https://github.com/maximeraafat/gta',
-    install_requires = [
-        'torch',
-        'torchvision',
-        'smplx',
-        'numpy',
-        'scipy',
-        'pillow',
-        'tqdm',
-        'opencv-python',
-        'matplotlib',
-        'fire',
-        'retry',
-        'einops>=0.3',
-        'kornia==0.5.4',
-        'adabelief-pytorch'
+  name = 'lightweight-gan',
+  packages = find_packages(),
+  entry_points={
+    'console_scripts': [
+      'lightweight_gan = lightweight_gan.cli:main',
     ],
+  },
+  version = __version__,
+  license='MIT',
+  description = 'Lightweight GAN',
+  author = 'Phil Wang',
+  author_email = 'lucidrains@gmail.com',
+  url = 'https://github.com/lucidrains/lightweight-gan',
+  keywords = [
+    'artificial intelligence',
+    'deep learning',
+    'generative adversarial networks'
+  ],
+  install_requires=[
+    'adabelief-pytorch',
+    'einops>=0.3',
+    'fire',
+    'kornia>=0.5.4',
+    'numpy',
+    'pillow',
+    'retry',
+    'torch>=1.6',
+    'torchvision',
+    'tqdm'
+  ],
+  classifiers=[
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.6',
+  ],
 )

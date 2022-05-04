@@ -1,10 +1,5 @@
 smplx/
-detectron2_repo/
-subject_*/
-humbi_output/
-log_outputs/
-tmp_files/
-smpla_tests/
-.ipynb_checkpoints/
-__pycache__/
-.DS_Store
+
+**/.ipynb_checkpoints/
+**/__pycache__/
+**/.DS_Store
