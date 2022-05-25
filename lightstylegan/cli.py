@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 import numpy as np
 
+
 def exists(val):
     return val is not None
 
@@ -162,7 +163,6 @@ def train_from_folder(
         calculate_fid_every = calculate_fid_every,
         calculate_fid_num_images = calculate_fid_num_images,
         clear_fid_cache = clear_fid_cache,
-        amp = amp
         amp = amp,
         load_strict = load_strict
     )
