@@ -1,5 +1,4 @@
 import os
-import sys
 import fire
 import random
 from retry.api import retry_call
@@ -36,7 +35,7 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-def run_training(rank, world_size, model_args, data, load_from, new, num_train_steps, name, seed):
+def run_training(rank, world_size, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash):
     is_main = rank == 0
     is_ddp = world_size > 1
 
@@ -54,7 +53,7 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
         world_size = world_size
     )
 
-    model = Trainer(**model_args)
+    model = Trainer(**model_args, hparams=model_args, use_aim=use_aim, aim_repo=aim_repo, aim_run_hash=aim_run_hash)
 
     if not new:
         model.load(load_from)
@@ -124,6 +123,10 @@ def train_from_folder(
     seed = 42,
     amp = False,
     show_progress = False,
+    use_aim = False,
+    aim_repo = None,
+    aim_run_hash = None,
+    load_strict = True
 ):
     num_image_tiles = default(num_image_tiles, 4 if image_size > 512 else 8)
 
@@ -160,6 +163,8 @@ def train_from_folder(
         calculate_fid_num_images = calculate_fid_num_images,
         clear_fid_cache = clear_fid_cache,
         amp = amp
+        amp = amp,
+        load_strict = load_strict
     )
 
     if generate:
@@ -196,17 +201,13 @@ def train_from_folder(
     world_size = torch.cuda.device_count()
 
     if world_size == 1 or not multi_gpus:
-        run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed)
+        run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash)
         return
 
     mp.spawn(run_training,
-        args=(world_size, model_args, data, load_from, new, num_train_steps, name, seed),
+        args=(world_size, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash,),
         nprocs=world_size,
         join=True)
 
 def main():
     fire.Fire(train_from_folder)
-
-
-if __name__ == '__main__':
-    sys.exit(main())

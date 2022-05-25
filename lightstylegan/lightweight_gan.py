@@ -4,13 +4,12 @@ import multiprocessing
 from random import random
 import math
 from math import log2, floor
-from functools import partial
+from functools import lru_cache, partial
 from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from shutil import rmtree
 
 import torch
-import numpy as np
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim import Adam
 from torch import nn, einsum
@@ -23,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from PIL import Image
 import torchvision
 from torchvision import transforms
-from kornia import filter2d
+from kornia.filters import filter2d
 
 from siren import Siren
 from diff_augment import DiffAugment
@@ -101,11 +100,6 @@ def evaluate_in_chunks(max_batch_size, model, nomapping, nomixing, *args):
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
 
-# linear interpolation
-def lerp(val, low, high):
-    res = (1.0 - val) * low + val * high
-    return res
-
 # spherical linear interpolation
 def slerp(val, low, high):
     low_norm = low / torch.norm(low, dim=1, keepdim=True)
@@ -143,6 +137,23 @@ def dual_contrastive_loss(real_logits, fake_logits):
 
     return loss_half(real_logits, fake_logits) + loss_half(-fake_logits, -real_logits)
 
+@lru_cache(maxsize=10)
+def det_randn(*args):
+    """
+    deterministic random to track the same latent vars (and images) across training steps
+    helps to visualize same image over training steps
+    """
+    return torch.randn(*args)
+
+def interpolate_between(a, b, *, num_samples, dim):
+    assert num_samples > 2
+    samples = []
+    step_size = 0
+    for _ in range(num_samples):
+        sample = torch.lerp(a, b, step_size)
+        samples.append(sample)
+        step_size += 1 / (num_samples - 1)
+    return torch.stack(samples, dim=dim)
 
 ## helper classes
 
@@ -176,9 +187,9 @@ class ChanNorm(nn.Module):
         self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
 
     def forward(self, x):
-        std = torch.var(x, dim = 1, unbiased = False, keepdim = True).sqrt()
+        var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
         mean = torch.mean(x, dim = 1, keepdim = True)
-        return (x - mean) / (std + self.eps) * self.g + self.b
+        return (x - mean) / (var + self.eps).sqrt() * self.g + self.b
 
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
@@ -214,6 +225,27 @@ class Blur(nn.Module):
         f = f[None, None, :] * f [None, :, None]
         return filter2d(x, f, normalized=True)
 
+class Noise(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, noise = None):
+        b, _, h, w, device = *x.shape, x.device
+
+        if not exists(noise):
+            noise = torch.randn(b, 1, h, w, device = device)
+
+        return x + self.weight * noise
+
+def Conv2dSame(dim_in, dim_out, kernel_size, bias = True):
+    pad_left = kernel_size // 2
+    pad_right = (pad_left - 1) if (kernel_size % 2) == 0 else pad_left
+
+    return nn.Sequential(
+        nn.ZeroPad2d((pad_left, pad_right, pad_left, pad_right)),
+        nn.Conv2d(dim_in, dim_out, kernel_size, bias = bias)
+    )
 
 ## attention
 
@@ -228,34 +260,66 @@ class DepthWiseConv2d(nn.Module):
         return self.net(x)
 
 class LinearAttention(nn.Module):
-    def __init__(self, dim, dim_head = 64, heads = 8):
+    def __init__(self, dim, dim_head = 64, heads = 8, kernel_size = 3):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
+        self.dim_head = dim_head
         inner_dim = dim_head * heads
 
+        self.kernel_size = kernel_size
         self.nonlin = nn.GELU()
+
+        self.to_lin_q = nn.Conv2d(dim, inner_dim, 1, bias = False)
+        self.to_lin_kv = DepthWiseConv2d(dim, inner_dim * 2, 3, padding = 1, bias = False)
+
         self.to_q = nn.Conv2d(dim, inner_dim, 1, bias = False)
-        self.to_kv = DepthWiseConv2d(dim, inner_dim * 2, 3, padding = 1, bias = False)
-        self.to_out = nn.Conv2d(inner_dim, dim, 1)
+        self.to_kv = nn.Conv2d(dim, inner_dim * 2, 1, bias = False)
+
+        self.to_out = nn.Conv2d(inner_dim * 2, dim, 1)
 
     def forward(self, fmap):
         h, x, y = self.heads, *fmap.shape[-2:]
+
+        # linear attention
+
+        lin_q, lin_k, lin_v = (self.to_lin_q(fmap), *self.to_lin_kv(fmap).chunk(2, dim = 1))
+        lin_q, lin_k, lin_v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) (x y) c', h = h), (lin_q, lin_k, lin_v))
+
+        lin_q = lin_q.softmax(dim = -1)
+        lin_k = lin_k.softmax(dim = -2)
+
+        lin_q = lin_q * self.scale
+
+        context = einsum('b n d, b n e -> b d e', lin_k, lin_v)
+        lin_out = einsum('b n d, b d e -> b n e', lin_q, context)
+        lin_out = rearrange(lin_out, '(b h) (x y) d -> b (h d) x y', h = h, x = x, y = y)
+
+        # conv-like full attention
+
         q, k, v = (self.to_q(fmap), *self.to_kv(fmap).chunk(2, dim = 1))
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) (x y) c', h = h), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) c x y', h = h), (q, k, v))
 
-        q = q.softmax(dim = -1)
-        k = k.softmax(dim = -2)
+        k = F.unfold(k, kernel_size = self.kernel_size, padding = self.kernel_size // 2)
+        v = F.unfold(v, kernel_size = self.kernel_size, padding = self.kernel_size // 2)
 
-        q = q * self.scale
+        k, v = map(lambda t: rearrange(t, 'b (d j) n -> b n j d', d = self.dim_head), (k, v))
 
-        context = einsum('b n d, b n e -> b d e', k, v)
-        out = einsum('b n d, b d e -> b n e', q, context)
-        out = rearrange(out, '(b h) (x y) d -> b (h d) x y', h = h, x = x, y = y)
+        q = rearrange(q, 'b c ... -> b (...) c') * self.scale
 
-        out = self.nonlin(out)
+        sim = einsum('b i d, b i j d -> b i j', q, k)
+        sim = sim - sim.amax(dim = -1, keepdim = True).detach()
+
+        attn = sim.softmax(dim = -1)
+
+        full_out = einsum('b i j, b i j d -> b i d', attn, v)
+        full_out = rearrange(full_out, '(b h) (x y) d -> b (h d) x y', h = h, x = x, y = y)
+
+        # add outputs of linear attention + conv like full attention
+
+        lin_out = self.nonlin(lin_out)
+        out = torch.cat((lin_out, full_out), dim = 1)
         return self.to_out(out)
-
 
 ## dataset
 
@@ -546,7 +610,8 @@ class Generator(nn.Module):
                 nn.Sequential(
                     upsample(),
                     Blur(),
-                    nn.Conv2d(chan_in, chan_out * 2, 3, padding = 1),
+                    Conv2dSame(chan_in, chan_out * 2, 4),
+                    Noise(),
                     norm_class(chan_out * 2),
                     nn.GLU(dim = 1)
                 ),
@@ -998,6 +1063,11 @@ class Trainer():
         world_size = 1,
         log = False,
         amp = False,
+        hparams = None,
+        use_aim = True,
+        aim_repo = None,
+        aim_run_hash = None,
+        load_strict = True,
         *args,
         **kwargs
     ):
@@ -1081,9 +1151,24 @@ class Trainer():
 
         self.syncbatchnorm = is_ddp
 
+        self.load_strict = load_strict
+
         self.amp = amp
         self.G_scaler = GradScaler(enabled = self.amp)
         self.D_scaler = GradScaler(enabled = self.amp)
+
+        self.run = None
+        self.hparams = hparams
+
+        if self.is_main and use_aim:
+            try:
+                import aim
+                self.aim = aim
+            except ImportError:
+                print('unable to import aim experiment tracker - please run `pip install aim` first')
+
+            self.run = self.aim.Run(run_hash=aim_run_hash, repo=aim_repo)
+            self.run['hparams'] = hparams
 
     @property
     def image_extension(self):
@@ -1375,10 +1460,44 @@ class Trainer():
         image_size = self.GAN.image_size
 
         # latents and noise
-        latents = torch.randn((num_rows ** 2, latent_dim)).to(self.device)
+        def image_to_pil(image):
+            ndarr = image.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+            im = Image.fromarray(ndarr)
+            return im
+
+        latents = det_randn((num_rows ** 2, latent_dim)).to(self.device)
+        interpolate_latents = interpolate_between(latents[:num_rows], latents[-num_rows:],
+                                                  num_samples=num_rows,
+                                                  dim=0).flatten(end_dim=1)
+
+        generate_interpolations = self.generate_(self.GAN.G, interpolate_latents)
+        if self.run is not None:
+            grouped = generate_interpolations.view(num_rows, num_rows, *generate_interpolations.shape[1:])
+            for idx, images in enumerate(grouped):
+                alpha = idx / (len(grouped) - 1)
+                aim_images = []
+                for image in images:
+                    im = image_to_pil(image)
+                    aim_images.append(self.aim.Image(im, caption=f'#{idx}'))
+
+                self.run.track(value=aim_images, name='generated',
+                               step=self.steps,
+                               context={'interpolated': True,
+                                        'alpha': alpha})
+        torchvision.utils.save_image(generate_interpolations, str(self.results_dir / self.name / f'{str(num)}-interp.{ext}'), nrow=num_rows)
 
         # regular
         generated_images = self.generate_(self.GAN.G, latents)
+
+        if self.run is not None:
+            aim_images = []
+            for idx, image in enumerate(generated_images):
+                img = image_to_pil(image)
+                aim_images.append(self.aim.Image(im, caption=f'#{idx}'))
+
+            self.run.track(value=aim_images, name='generated',
+                           step=self.steps,
+                           context={'ema': False})
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
         if self.render:
             rendered_images = self.rendering.render(generated_images)
@@ -1386,6 +1505,15 @@ class Trainer():
 
         # moving averages
         generated_images = self.generate_(self.GAN.GE, latents)
+        if self.run is not None:
+            aim_images = []
+            for idx, image in enumerate(generated_images):
+                im = image_to_pil(image)
+                aim_images.append(self.aim.Image(im, caption=f'EMA #{idx}'))
+
+            self.run.track(value=aim_images, name='generated',
+                           step=self.steps,
+                           context={'ema': True})
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
         if self.render:
             rendered_images = self.rendering.render(generated_images)
@@ -1532,7 +1660,7 @@ class Trainer():
             if slerp_interp:
                 interp_latents = slerp(ratio, latents_low, latents_high)
             else:
-                interp_latents = lerp(ratio, latents_low, latents_high)
+                interp_latents = torch.lerp(latents_low, latents_high, ratio)
 
             generated_images = self.generate_(self.GAN.GE, interp_latents)
             images_grid = torchvision.utils.make_grid(generated_images, nrow = num_rows)
@@ -1564,6 +1692,12 @@ class Trainer():
         data = [d for d in data if exists(d[1])]
         log = ' | '.join(map(lambda n: f'{n[0]}: {n[1]:.2f}', data))
         print(log)
+
+        if self.run is not None:
+            for key, value in data:
+                self.run.track(value, key, step=self.steps)
+
+        return data
 
     def model_name(self, num):
         return str(self.models_dir / self.name / f'model_{num}.pt')
@@ -1611,9 +1745,10 @@ class Trainer():
             print(f"loading from version {load_data['version']}")
 
         try:
-            self.GAN.load_state_dict(load_data['GAN'])
+            self.GAN.load_state_dict(load_data['GAN'], strict = self.load_strict)
         except Exception as e:
-            print('unable to load save model. please try downgrading the package to the version specified by the saved model')
+            saved_version = load_data['version']
+            print('unable to load save model. please try downgrading the package to the version specified by the saved model (to do so, just run `pip install lightweight-gan=={saved_version}`')
             raise e
 
         if 'G_scaler' in load_data:
