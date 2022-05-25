@@ -94,9 +94,9 @@ def gradient_accumulate_contexts(gradient_accumulate_every, is_ddp, ddps):
         with context():
             yield
 
-def evaluate_in_chunks(max_batch_size, model, nomixing, *args):
+def evaluate_in_chunks(max_batch_size, model, nomapping, nomixing, *args):
     split_args = list(zip(*list(map(lambda x: x.split(max_batch_size, dim=0), args))))
-    chunked_outputs = [model(*i, nomixing=nomixing) for i in split_args]
+    chunked_outputs = [model(*i, nomapping=nomapping, nomixing=nomixing) for i in split_args]
     if len(chunked_outputs) == 1:
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
@@ -302,23 +302,16 @@ class ImageDataset(Dataset):
     def __init__(
         self,
         folder,
-        disp_folder,
         image_size,
         transparent = False,
         greyscale = False,
-        rgbxyz = False,
         aug_prob = 0.
     ):
         super().__init__()
-        self.rgbxyz = rgbxyz
         self.folder = folder
         self.image_size = image_size
         self.paths = [p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
         assert len(self.paths) > 0, f'No images were found in {folder} for training'
-        if rgbxyz:
-            self.disp_folder = disp_folder
-            self.disp_paths = [p for ext in EXTS for p in Path(f'{disp_folder}').glob(f'**/*.{ext}')]
-            assert len(self.disp_paths) > 0, f'No images were found in {disp_folder} for training'
 
         if transparent:
             num_channels = 4
@@ -328,10 +321,6 @@ class ImageDataset(Dataset):
             num_channels = 1
             pillow_mode = 'L'
             expand_fn = identity()
-        elif rgbxyz:
-            num_channels = 6
-            pillow_mode = 'RGB'
-            expand_fn = expand_greyscale(transparent)
         else:
             num_channels = 3
             pillow_mode = 'RGB'
@@ -354,16 +343,7 @@ class ImageDataset(Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
-
-        if self.rgbxyz:
-            disp_path = self.disp_paths[index]
-            disp_img = Image.open(disp_path)
-            transf_img = np.asarray(self.transform(img))
-            transf_disps = np.asarray(self.transform(disp_img))
-            concat = np.concatenate((transf_img, transf_disps), axis=0)
-            return concat
-        else:
-            return self.transform(img)
+        return self.transform(img)
 
 
 ## augmentations
@@ -483,9 +463,9 @@ class Generator(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        rgbxyz = False,
         styling = False,
         fourier = False,
+        render = False,
         attn_res_layers = [],
         freq_chan_attn = False,
         rank = 0
@@ -498,8 +478,6 @@ class Generator(nn.Module):
             init_channel = 4
         elif greyscale:
             init_channel = 1
-        elif rgbxyz:
-            init_channel = 6
         else:
             init_channel = 3
 
@@ -579,6 +557,7 @@ class Generator(nn.Module):
 
         # bijective SIREN mapping (input dimension = output dimension = hidden layers dimension)
         self.siren = Siren(in_features = latent_dim, out_features = latent_dim, hidden_features = latent_dim, hidden_layers = 2, outermost_linear = True)
+        self.linear = nn.Linear(latent_dim, 1024) # affine transformation of SIREN output
         self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
 
     # fourier feature mapping : https://github.com/tancik/fourier-feature-networks
@@ -598,7 +577,8 @@ class Generator(nn.Module):
 
     # get style from latent via learned affine transformation
     def get_styles(self, latent):
-        output = self.fourier_encoding(latent, L=2).to(self.device)
+        output = self.linear(latent).reshape(latent.shape[0], -1, 2).to(self.device)
+        # output = self.fourier_encoding(latent, L=2).to(self.device)
 
         styles = {}
         biases = {}
@@ -661,6 +641,7 @@ class Generator(nn.Module):
                 # AdaIN as in StyleGAN (adaptive instance normalization)
                 x = (x - mean) / std
                 x = styles['s%d' % res] * x + biases['b%d' % res]
+                # x = x * (styles['s%d' % res] + 1) + biases['b%d' % res]
 
             x = up(x)
 
@@ -714,7 +695,6 @@ class Discriminator(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        rgbxyz = False,
         disc_output_size = 5,
         attn_res_layers = []
     ):
@@ -729,8 +709,6 @@ class Discriminator(nn.Module):
             init_channel = 4
         elif greyscale:
             init_channel = 1
-        elif rgbxyz:
-            init_channel = 6
         else:
             init_channel = 3
 
@@ -890,9 +868,9 @@ class LightweightGAN(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        rgbxyz = False,
         styling = False,
         fourier = False,
+        render = False,
         disc_output_size = 5,
         attn_res_layers = [],
         freq_chan_attn = False,
@@ -914,9 +892,9 @@ class LightweightGAN(nn.Module):
             fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
-            rgbxyz = rgbxyz,
             styling = styling,
             fourier = fourier,
+            render = render,
             attn_res_layers = attn_res_layers,
             freq_chan_attn = freq_chan_attn,
             rank = rank
@@ -930,7 +908,6 @@ class LightweightGAN(nn.Module):
             fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
-            rgbxyz = rgbxyz,
             attn_res_layers = attn_res_layers,
             disc_output_size = disc_output_size
         )
@@ -993,9 +970,10 @@ class Trainer():
         fmap_max = 512,
         transparent = False,
         greyscale = False,
-        rgbxyz = False,
         styling = False,
+        nomapping = False,
         fourier = False,
+        render = False,
         batch_size = 4,
         gp_weight = 10,
         gradient_accumulate_every = 1,
@@ -1049,9 +1027,10 @@ class Trainer():
         self.fmap_max = fmap_max
         self.transparent = transparent
         self.greyscale = greyscale
-        self.rgbxyz = rgbxyz
         self.styling = styling
+        self.nomapping = nomapping
         self.fourier = fourier
+        self.render = render
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
 
@@ -1145,13 +1124,17 @@ class Trainer():
             disc_output_size = self.disc_output_size,
             transparent = self.transparent,
             greyscale = self.greyscale,
-            rgbxyz = self.rgbxyz,
             styling = self.styling,
             fourier = self.fourier,
+            render = self.render,
             rank = self.rank,
             *args,
             **kwargs
         )
+
+        if self.render:
+            from rendering import Rendering # no need for pytorch3d if no rendering
+            self.rendering = Rendering(image_size = self.image_size, transparent = self.transparent, rank = self.rank)
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank], 'output_device': self.rank, 'find_unused_parameters': True}
@@ -1173,9 +1156,9 @@ class Trainer():
         self.syncbatchnorm = config['syncbatchnorm']
         self.disc_output_size = config['disc_output_size']
         self.greyscale = config.pop('greyscale', False)
-        self.rgbxyz = config.pop('rgbxyz', False)
         self.styling = config.pop('styling', False)
         self.fourier = config.pop('fourier', False)
+        self.render = config.pop('render', False)
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
         self.optimizer = config.pop('optimizer', 'adam')
@@ -1188,9 +1171,9 @@ class Trainer():
             'image_size': self.image_size,
             'transparent': self.transparent,
             'greyscale': self.greyscale,
-            'rgbxyz': self.rgbxyz,
             'styling': self.styling,
             'fourier': self.fourier,
+            'render': self.render,
             'syncbatchnorm': self.syncbatchnorm,
             'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
@@ -1198,9 +1181,9 @@ class Trainer():
             'freq_chan_attn': self.freq_chan_attn
         }
 
-    def set_data_src(self, folder, disp_folder):
+    def set_data_src(self, folder):
         num_workers = default(self.num_workers, math.ceil(NUM_CORES / self.world_size))
-        self.dataset = ImageDataset(folder, disp_folder, self.image_size, transparent = self.transparent, greyscale = self.greyscale, rgbxyz = self.rgbxyz, aug_prob = self.dataset_aug_prob)
+        self.dataset = ImageDataset(folder, self.image_size, transparent = self.transparent, greyscale = self.greyscale, aug_prob = self.dataset_aug_prob)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = DataLoader(self.dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
         self.loader = cycle(dataloader)
@@ -1255,6 +1238,8 @@ class Trainer():
             with amp_context():
                 with torch.no_grad():
                     generated_images = G(latents)
+                    if self.render:
+                        generated_images = self.rendering.render(generated_images)
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, detach = True, **aug_kwargs)
 
@@ -1323,6 +1308,8 @@ class Trainer():
 
             with amp_context():
                 generated_images = G(latents)
+                if self.render:
+                    generated_images = self.rendering.render(generated_images)
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, **aug_kwargs)
                 real_output, real_output_32x32, _ = D_aug(image_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
@@ -1392,20 +1379,17 @@ class Trainer():
 
         # regular
         generated_images = self.generate_(self.GAN.G, latents)
-
-        if self.rgbxyz:
-            torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb.{ext}'), nrow=num_rows)
-            torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp.{ext}'), nrow=num_rows)
-        else:
-            torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
+        torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
+        if self.render:
+            rendered_images = self.rendering.render(generated_images)
+            torchvision.utils.save_image(rendered_images, str(self.results_dir / self.name / f'{str(num)}_rendered.{ext}'), nrow=num_rows)
 
         # moving averages
         generated_images = self.generate_(self.GAN.GE, latents)
-        if self.rgbxyz:
-            torchvision.utils.save_image(generated_images[:,:3,...], str(self.results_dir / self.name / f'{str(num)}_rgb-ema.{ext}'), nrow=num_rows)
-            torchvision.utils.save_image(generated_images[:,3:,...], str(self.results_dir / self.name / f'{str(num)}_disp-ema.{ext}'), nrow=num_rows)
-        else:
-            torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
+        torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
+        if self.render:
+            rendered_images = self.rendering.render(generated_images)
+            torchvision.utils.save_image(rendered_images, str(self.results_dir / self.name / f'{str(num)}-ema_rendered.{ext}'), nrow=num_rows)
 
     @torch.no_grad()
     def generate(self, num=0, num_image_tiles=4, checkpoint=None, types=['default', 'ema']):
@@ -1424,28 +1408,16 @@ class Trainer():
             for i in tqdm(range(num_image_tiles), desc='Saving generated default images'):
                 latents = torch.randn((1, latent_dim)).to(self.device)
                 generated_image = self.generate_(self.GAN.G, latents)
-                if self.rgbxyz:
-                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rgb.{ext}')
-                    path_disp = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_disp.{ext}')
-                    torchvision.utils.save_image(generated_image[0][:3,...], path, nrow=1)
-                    torchvision.utils.save_image(generated_image[0][3:,...], path_disp, nrow=1)
-                else:
-                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}.{ext}')
-                    torchvision.utils.save_image(generated_image[0], path, nrow=1)
+                path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}.{ext}')
+                torchvision.utils.save_image(generated_image[0], path, nrow=1)
 
         # moving averages
         if 'ema' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated EMA images'):
                 latents = torch.randn((1, latent_dim)).to(self.device)
                 generated_image = self.generate_(self.GAN.GE, latents)
-                if self.rgbxyz:
-                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rgb-ema.{ext}')
-                    path_disp = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_disp-ema.{ext}')
-                    torchvision.utils.save_image(generated_image[0][:3,...], path, nrow=1)
-                    torchvision.utils.save_image(generated_image[0][3:,...], path_disp, nrow=1)
-                else:
-                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema.{ext}')
-                    torchvision.utils.save_image(generated_image[0], path, nrow=1)
+                path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema.{ext}')
+                torchvision.utils.save_image(generated_image[0], path, nrow=1)
 
         return dir_full
 
@@ -1474,26 +1446,14 @@ class Trainer():
             # regular
             if 'default' in types:
                 generated_image = self.generate_(self.GAN.G, latents)
-                if self.rgbxyz:
-                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_rgb.{ext}')
-                    path_disp = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_disp.{ext}')
-                    torchvision.utils.save_image(generated_image[:,:3,...], path, nrow=num_images)
-                    torchvision.utils.save_image(generated_image[:,3:,...], path_disp, nrow=num_images)
-                else:
-                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}.{ext}')
-                    torchvision.utils.save_image(generated_image, path, nrow=num_images)
+                path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}.{ext}')
+                torchvision.utils.save_image(generated_image, path, nrow=num_images)
 
             # moving averages
             if 'ema' in types:
                 generated_image = self.generate_(self.GAN.GE, latents)
-                if self.rgbxyz:
-                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_rgb-ema.{ext}')
-                    path_disp = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}_disp-ema.{ext}')
-                    torchvision.utils.save_image(generated_image[:,:3,...], path, nrow=num_images)
-                    torchvision.utils.save_image(generated_image[:,3:,...], path_disp, nrow=num_images)
-                else:
-                    path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}-ema.{ext}')
-                    torchvision.utils.save_image(generated_image, path, nrow=num_images)
+                path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}-ema.{ext}')
+                torchvision.utils.save_image(generated_image, path, nrow=num_images)
 
     @torch.no_grad()
     def calculate_fid(self, num_batches):
@@ -1512,11 +1472,7 @@ class Trainer():
                 real_batch = next(self.loader)
                 for k, image in enumerate(real_batch.unbind(0)):
                     ind = k + batch_num * self.batch_size
-                    if self.rgbxyz:
-                        torchvision.utils.save_image(image[:,:3,...], real_path / f'{ind}_rgb.png')
-                        torchvision.utils.save_image(image[:,3:,...], real_path / f'{ind}_disp.png')
-                    else:
-                        torchvision.utils.save_image(image, real_path / f'{ind}.png')
+                    torchvision.utils.save_image(image, real_path / f'{ind}.png')
 
         ## generate a bunch of fake images in results / name / fid_fake
 
@@ -1538,17 +1494,13 @@ class Trainer():
 
             for j, image in enumerate(generated_images.unbind(0)):
                 ind = j + batch_num * self.batch_size
-                if self.rgbxyz:
-                    torchvision.utils.save_image(image[:,:3,...], str(fake_path / f'{str(ind)}_rgb-ema.{ext}'))
-                    torchvision.utils.save_image(image[:,3:,...], str(fake_path / f'{str(ind)}_disp-ema.{ext}'))
-                else:
-                    torchvision.utils.save_image(image, str(fake_path / f'{str(ind)}-ema.{ext}'))
+                torchvision.utils.save_image(image, str(fake_path / f'{str(ind)}-ema.{ext}'))
 
         return fid_score.calculate_fid_given_paths([str(real_path), str(fake_path)], 256, latents.device, 2048)
 
     @torch.no_grad()
     def generate_(self, G, style, num_image_tiles = 8):
-        generated_images = evaluate_in_chunks(self.batch_size, G, True, style) # no style mixing regularization (nomixing=True) during evaluation
+        generated_images = evaluate_in_chunks(self.batch_size, G, self.nomapping, True, style) # no style mixing regularization (nomixing=True) during evaluation
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()

@@ -36,7 +36,7 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-def run_training(rank, world_size, model_args, data, disp_data, load_from, new, num_train_steps, name, seed):
+def run_training(rank, world_size, model_args, data, load_from, new, num_train_steps, name, seed):
     is_main = rank == 0
     is_ddp = world_size > 1
 
@@ -61,7 +61,7 @@ def run_training(rank, world_size, model_args, data, disp_data, load_from, new, 
     else:
         model.clear()
 
-    model.set_data_src(data, disp_data)
+    model.set_data_src(data)
 
     progress_bar = tqdm(initial = model.steps, total = num_train_steps, mininterval=10., desc=f'{name}<{data}>')
     while model.steps < num_train_steps:
@@ -78,7 +78,6 @@ def run_training(rank, world_size, model_args, data, disp_data, load_from, new, 
 
 def train_from_folder(
     data = './data',
-    disp_data = './disp_data',
     results_dir = './results',
     models_dir = './models',
     name = 'default',
@@ -89,10 +88,11 @@ def train_from_folder(
     fmap_max = 512,
     transparent = False,
     greyscale = False,
-    rgbxyz = False,
     styling = False,
+    nomapping = False,
     fourier = False,
     latent_dim = 256,
+    render = False,
     batch_size = 8,
     gradient_accumulate_every = 4,
     num_train_steps = 150000,
@@ -145,10 +145,11 @@ def train_from_folder(
         fmap_max = fmap_max,
         transparent = transparent,
         greyscale = greyscale,
-        rgbxyz = rgbxyz,
         styling = styling,
+        nomapping = nomapping,
         fourier = fourier,
         latent_dim = latent_dim,
+        render = render,
         lr = learning_rate,
         save_every = save_every,
         evaluate_every = evaluate_every,
@@ -195,22 +196,13 @@ def train_from_folder(
     world_size = torch.cuda.device_count()
 
     if world_size == 1 or not multi_gpus:
-        if rgbxyz:
-            run_training(0, 1, model_args, data, disp_data, load_from, new, num_train_steps, name, seed)
-        else:
-            run_training(0, 1, model_args, data, None, load_from, new, num_train_steps, name, seed)
+        run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed)
         return
 
-    if rgbxyz:
-        mp.spawn(run_training,
-            args=(world_size, model_args, data, disp_data, load_from, new, num_train_steps, name, seed),
-            nprocs=world_size,
-            join=True)
-    else:
-        mp.spawn(run_training,
-            args=(world_size, model_args, data, None, load_from, new, num_train_steps, name, seed),
-            nprocs=world_size,
-            join=True)
+    mp.spawn(run_training,
+        args=(world_size, model_args, data, load_from, new, num_train_steps, name, seed),
+        nprocs=world_size,
+        join=True)
 
 def main():
     fire.Fire(train_from_folder)
