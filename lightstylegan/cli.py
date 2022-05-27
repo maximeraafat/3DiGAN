@@ -1,4 +1,5 @@
 import os
+import sys
 import fire
 import random
 from retry.api import retry_call
@@ -211,3 +212,7 @@ def train_from_folder(
 
 def main():
     fire.Fire(train_from_folder)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

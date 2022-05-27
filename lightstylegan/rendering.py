@@ -47,10 +47,7 @@ class Rendering():
         self.faces_per_pixel = faces_per_pixel
         self.transparent = transparent
 
-        if transparent:
-            self.background_color = (0., 0., 0.)
-        else:
-            self.background_color = (1., 1., 1.)
+        self.background_color = (0., 0., 0.) if transparent else (1., 1., 1.)
 
         self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
@@ -75,7 +72,7 @@ class Rendering():
             image_size=self.image_size,
             blur_radius=np.log(1./1e-4 - 1.) * blend_params.sigma,
             faces_per_pixel=self.faces_per_pixel,
-            # perspective_correct=False
+            perspective_correct=False
         )
 
         # create phong renderer by composing a rasterizer and a shader
@@ -119,18 +116,17 @@ class Rendering():
 
         return Meshes(mesh.verts_padded(), mesh.faces_padded(), texture_uv).to(self.device)
 
-    def render(self, texture):
-        batch_size = texture.shape[0]
+    def render(self, texture, supervision=False):
+        b = texture.shape[0] # batch size
 
-        uvs = self.get_smplx_uvs(self.smplx_uv_path, batch_size)
-        mesh = self.get_mesh(self.mesh_obj_path, batch_size)
+        uvs = self.get_smplx_uvs(self.smplx_uv_path, b)
+        mesh = self.get_mesh(self.mesh_obj_path, b)
         textured_mesh = self.get_textured_mesh(mesh, uvs, texture)
 
-        azim = np.random.choice(self.azimuths, batch_size, replace=True)
-        elev = np.random.choice(self.elevations, batch_size, replace=True, p=self.elev_probs)
-        dist = [3] * batch_size
+        azim = np.random.choice(self.azimuths, b, replace=True) if not supervision else 90
+        elev = np.random.choice(self.elevations, b, replace=True, p=self.elev_probs) if not supervision else 0
+        dist = [3] * b
 
-        # R, T = look_at_view_transform(dist=3, elev=0, azim=90)
         R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
         cameras = OrthographicCameras(R=R, T=T, device=self.device)
 
