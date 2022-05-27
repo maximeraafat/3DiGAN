@@ -12,7 +12,7 @@ from pytorch3d.renderer import (
     RasterizationSettings,
     MeshRenderer,
     MeshRasterizer,
-    SoftPhongShader,
+    HardPhongShader,
     AmbientLights,
     PointLights,
     Materials,
@@ -81,7 +81,7 @@ class Rendering():
                 cameras=cameras,
                 raster_settings=raster_settings
             ),
-            shader=SoftPhongShader(
+            shader=HardPhongShader(
                 device=self.device,
                 cameras=cameras,
                 lights=lights,
@@ -125,7 +125,7 @@ class Rendering():
 
         azim = np.random.choice(self.azimuths, b, replace=True) if not supervision else 90
         elev = np.random.choice(self.elevations, b, replace=True, p=self.elev_probs) if not supervision else 0
-        dist = [3] * b
+        dist = 3
 
         R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
         cameras = OrthographicCameras(R=R, T=T, device=self.device)
