@@ -8,6 +8,7 @@ from functools import lru_cache, partial
 from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from shutil import rmtree
+import numpy as np
 
 import torch
 from torch.cuda.amp import autocast, GradScaler
@@ -367,6 +368,7 @@ class ImageDataset(Dataset):
         self,
         folder,
         image_size,
+        labels = False,
         transparent = False,
         greyscale = False,
         aug_prob = 0.
@@ -374,8 +376,10 @@ class ImageDataset(Dataset):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
-        self.paths = [p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = sorted([p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')])
         assert len(self.paths) > 0, f'No images were found in {folder} for training'
+
+        self.labels = self.load_labels() if labels else None
 
         if transparent:
             num_channels = 4
@@ -401,13 +405,24 @@ class ImageDataset(Dataset):
             transforms.Lambda(expand_fn)
         ])
 
+    def load_labels(self):
+        filename = 'dataset.json'
+        with open(os.path.join(self.folder, filename)) as f:
+            labels = json.load(f)['labels']
+        if labels is None:
+            return None
+        labels = dict(labels)
+        labels = [labels[fname.parts[-1]] for fname in self.paths]
+        labels = torch.Tensor(labels).to(dtype=torch.float)
+        return labels
+
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
-        return self.transform(img)
+        return (self.transform(img), self.labels[index]) if self.labels is not None else self.transform(img)
 
 
 ## augmentations
@@ -422,7 +437,7 @@ class AugWrapper(nn.Module):
         super().__init__()
         self.D = D
 
-    def forward(self, images, prob = 0., types = [], detach = False, **kwargs):
+    def forward(self, images, labels=None, prob=0., types=[], detach=False, **kwargs):
         context = torch.no_grad if detach else null_context
 
         with context():
@@ -430,7 +445,7 @@ class AugWrapper(nn.Module):
                 images = random_hflip(images, prob=0.5)
                 images = DiffAugment(images, types=types)
 
-        return self.D(images, **kwargs)
+        return self.D(images, labels, **kwargs)
 
 # modifiable global variables
 norm_class = nn.BatchNorm2d
@@ -530,6 +545,7 @@ class Generator(nn.Module):
         styling = False,
         fourier = False,
         render = False,
+        labels = False,
         attn_res_layers = [],
         freq_chan_attn = False,
         rank = 0
@@ -553,6 +569,9 @@ class Generator(nn.Module):
         if fourier:
             self.basis_dim = 256 // (latent_dim * 2) # basis dim in fourier decomposition such that we have a ~256D latent after decomposition
             latent_dim = self.basis_dim * latent_dim * 2 # if we perform fourier decomposition, we change the latent dimension
+
+        if labels:
+            latent_dim *= 2
 
         fmap_max = default(fmap_max, latent_dim)
 
@@ -621,8 +640,12 @@ class Generator(nn.Module):
             self.layers.append(layer)
 
         # bijective SIREN mapping (input dimension = output dimension = hidden layers dimension)
-        self.siren = Siren(in_features = latent_dim, out_features = latent_dim, hidden_features = latent_dim, hidden_layers = 2, outermost_linear = True)
-        self.linear = nn.Linear(latent_dim, 1024) # affine transformation of SIREN output
+        if styling:
+            self.siren = Siren(in_features = latent_dim, out_features = latent_dim, hidden_features = latent_dim, hidden_layers = 2, outermost_linear = True)
+            self.linear = nn.Linear(latent_dim, 1024) # affine transformation of SIREN output
+        if labels:
+            self.cond_fc = nn.Linear(2, latent_dim//2) # TODO : extend to more than 2 labels
+
         self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
 
     # fourier feature mapping : https://github.com/tancik/fourier-feature-networks
@@ -654,7 +677,13 @@ class Generator(nn.Module):
 
         return styles, biases
 
-    def forward(self, latent, nomapping=False, nomixing=False):
+    def conditional_latent(self, latent, label):
+        label = self.cond_fc(label)
+        label = F.normalize(label, dim=1)
+        latent = torch.cat([latent, label], dim=1)
+        return latent
+
+    def forward(self, latent, label=None, nomapping=False, nomixing=False):
         # styling a constant vector as in StyleGAN
         if self.styling:
             # constant vector, on which we will apply styling from latent
@@ -678,6 +707,9 @@ class Generator(nn.Module):
 
         else:
             x = latent
+
+        if label is not None:
+            x = self.conditional_latent(x, label)
 
         x = rearrange(x, 'b c -> b c () ()')
         x = self.initial_conv(x)
@@ -760,6 +792,7 @@ class Discriminator(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
+        labels = False,
         disc_output_size = 5,
         attn_res_layers = []
     ):
@@ -868,10 +901,22 @@ class Discriminator(nn.Module):
             nn.Conv2d(32, 1, 4)
         )
 
-        self.decoder1 = SimpleDecoder(chan_in = last_chan, chan_out = init_channel)
-        self.decoder2 = SimpleDecoder(chan_in = features[-2][-1], chan_out = init_channel) if resolution >= 9 else None
+        self.decoder1 = SimpleDecoder(chan_in=last_chan, chan_out=init_channel)
+        self.decoder2 = SimpleDecoder(chan_in=features[-2][-1], chan_out=init_channel) if resolution >= 9 else None
 
-    def forward(self, x, calc_aux_loss = False):
+        if labels:
+            self.cond_fc = nn.Linear(2, fmap_max//2) # TODO : extend to more than 2 labels
+
+    def conditioned_output(self, output, label):
+        label = self.cond_fc(label)
+        label = F.normalize(label, dim=1)
+        output_shape = output.shape
+        output = output.reshape(output_shape[:2])
+        output = (output * label).sum(dim=1, keepdim=True) * (1 / np.sqrt(label.shape[-1]))
+        output = output.reshape(output_shape)
+        return output
+
+    def forward(self, x, label=None, calc_aux_loss=False):
         orig_img = x
 
         for layer in self.non_residual_layers:
@@ -888,8 +933,12 @@ class Discriminator(nn.Module):
 
         out = self.to_logits(x).flatten(1)
 
-        img_32x32 = F.interpolate(orig_img, size = (32, 32))
+        img_32x32 = F.interpolate(orig_img, size=(32, 32))
         out_32x32 = self.to_shape_disc_out(img_32x32)
+
+        if label is not None:
+            out = self.conditioned_output(out, label)
+            out_32x32 = self.conditioned_output(out_32x32, label)
 
         if not calc_aux_loss:
             return out, out_32x32, None
@@ -936,6 +985,8 @@ class LightweightGAN(nn.Module):
         styling = False,
         fourier = False,
         render = False,
+        labels = False,
+        supervision = 'discriminator',
         disc_output_size = 5,
         attn_res_layers = [],
         freq_chan_attn = False,
@@ -960,6 +1011,7 @@ class LightweightGAN(nn.Module):
             styling = styling,
             fourier = fourier,
             render = render,
+            labels = labels,
             attn_res_layers = attn_res_layers,
             freq_chan_attn = freq_chan_attn,
             rank = rank
@@ -973,9 +1025,21 @@ class LightweightGAN(nn.Module):
             fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
+            labels = labels,
             attn_res_layers = attn_res_layers,
             disc_output_size = disc_output_size
         )
+
+        if supervision == 'discriminator':
+            self.target_D = Discriminator(
+                image_size = image_size,
+                fmap_max = fmap_max,
+                fmap_inverse_coef = fmap_inverse_coef,
+                transparent = transparent,
+                greyscale = greyscale,
+                attn_res_layers = attn_res_layers,
+                disc_output_size = disc_output_size
+            )
 
         self.ema_updater = EMA(0.995)
         self.GE = Generator(**G_kwargs)
@@ -984,9 +1048,13 @@ class LightweightGAN(nn.Module):
         if optimizer == "adam":
             self.G_opt = Adam(self.G.parameters(), lr = lr, betas=(0.5, 0.9))
             self.D_opt = Adam(self.D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
+            if supervision == 'discriminator':
+                self.target_D_opt = Adam(self.target_D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
         elif optimizer == "adabelief":
             self.G_opt = AdaBelief(self.G.parameters(), lr = lr, betas=(0.5, 0.9))
             self.D_opt = AdaBelief(self.D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
+            if supervision == 'discriminator':
+                self.target_D_opt = AdaBelief(self.target_D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
         else:
             assert False, "No valid optimizer is given"
 
@@ -995,6 +1063,8 @@ class LightweightGAN(nn.Module):
 
         self.to(device)
         self.D_aug = AugWrapper(self.D, image_size)
+        if supervision == 'discriminator':
+            self.target_D_aug = AugWrapper(self.target_D, image_size)
 
     def _init_weights(self, m):
         if type(m) in {nn.Conv2d, nn.Linear}:
@@ -1039,6 +1109,8 @@ class Trainer():
         nomapping = False,
         fourier = False,
         render = False,
+        labels = False,
+        supervision = 'discriminator',
         batch_size = 4,
         gp_weight = 10,
         gradient_accumulate_every = 1,
@@ -1089,6 +1161,8 @@ class Trainer():
 
         assert not (dual_contrast_loss and disc_output_size > 1), 'discriminator output size cannot be greater than 1 if using dual contrastive loss'
 
+        assert supervision == 'discriminator' or supervision == 'view', "supervision can only be either 'discriminator' or 'view'"
+
         self.image_size = image_size
         self.num_image_tiles = num_image_tiles
 
@@ -1101,6 +1175,10 @@ class Trainer():
         self.nomapping = nomapping
         self.fourier = fourier
         self.render = render
+        self.supervision = supervision
+        self.labels = labels
+
+        self.swapping_prob = 0.5
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
 
@@ -1137,6 +1215,8 @@ class Trainer():
         self.init_folders()
 
         self.loader = None
+        self.target_loader = None
+        self.data_ratio = 1
         self.dataset_aug_prob = dataset_aug_prob
 
         self.calculate_fid_every = calculate_fid_every
@@ -1212,6 +1292,8 @@ class Trainer():
             styling = self.styling,
             fourier = self.fourier,
             render = self.render,
+            labels = self.labels,
+            supervision = self.supervision,
             rank = self.rank,
             *args,
             **kwargs
@@ -1220,6 +1302,7 @@ class Trainer():
         if self.render:
             from rendering import Rendering # no need for pytorch3d if no rendering
             self.rendering = Rendering(image_size = self.image_size, transparent = self.transparent, rank = self.rank)
+            self.supervision_loss = nn.MSELoss()
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank], 'output_device': self.rank, 'find_unused_parameters': True}
@@ -1227,6 +1310,9 @@ class Trainer():
             self.G_ddp = DDP(self.GAN.G, **ddp_kwargs)
             self.D_ddp = DDP(self.GAN.D, **ddp_kwargs)
             self.D_aug_ddp = DDP(self.GAN.D_aug, **ddp_kwargs)
+            if self.supervision == 'discriminator':
+                self.target_D_ddp = DDP(self.GAN.target_D, **ddp_kwargs)
+                self.target_D_aug_ddp = DDP(self.GAN.target_D_aug, **ddp_kwargs)
 
         print('\nnumber of learnable model parameters : %d' % count_parameters(self.GAN, True))
         print('number of frozen model parameters : %d\n' % count_parameters(self.GAN, False))
@@ -1244,6 +1330,8 @@ class Trainer():
         self.styling = config.pop('styling', False)
         self.fourier = config.pop('fourier', False)
         self.render = config.pop('render', False)
+        self.labels = config.pop('conditional', False)
+        self.supervision = config.pop('supervision', None)
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
         self.optimizer = config.pop('optimizer', 'adam')
@@ -1259,6 +1347,8 @@ class Trainer():
             'styling': self.styling,
             'fourier': self.fourier,
             'render': self.render,
+            'conditional' : self.labels,
+            'supervision': self.supervision, # TODO : needs to be None if no target folder
             'syncbatchnorm': self.syncbatchnorm,
             'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
@@ -1266,18 +1356,41 @@ class Trainer():
             'freq_chan_attn': self.freq_chan_attn
         }
 
-    def set_data_src(self, folder):
+    def set_data_src(self, folder, target_folder=None):
         num_workers = default(self.num_workers, math.ceil(NUM_CORES / self.world_size))
-        self.dataset = ImageDataset(folder, self.image_size, transparent = self.transparent, greyscale = self.greyscale, aug_prob = self.dataset_aug_prob)
+        self.dataset = ImageDataset(folder, self.image_size, labels = self.labels, transparent = self.transparent, greyscale = self.greyscale, aug_prob = self.dataset_aug_prob)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = DataLoader(self.dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
         self.loader = cycle(dataloader)
+
+        if target_folder:
+            assert self.render, 'the render flag must be called when using a target folder'
+            self.target_dataset = ImageDataset(target_folder, self.image_size, transparent = self.transparent, greyscale = self.greyscale, aug_prob = self.dataset_aug_prob)
+            target_sampler = DistributedSampler(self.target_dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
+            target_dataloader = DataLoader(self.target_dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = target_sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
+            self.target_loader = cycle(target_dataloader)
+
+            self.data_ratio = len(self.dataset) // len(self.target_dataset)
+            print('semi-superivision rendering loss every %d epochs' % self.data_ratio)
 
         # auto set augmentation prob for user if dataset is detected to be low
         num_samples = len(self.dataset)
         if not exists(self.aug_prob) and num_samples < 1e5:
             self.aug_prob = min(0.5, (1e5 - num_samples) * 3e-6)
             print(f'autosetting augmentation probability to {round(self.aug_prob * 100)}%')
+
+    def sample_label(self, size, swapping=False):
+        idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
+        labels = torch.Tensor(self.dataset.labels[idx]).to(self.device)
+
+        if swapping:
+            # swap labels for which label[i] does not satisfy random[i] < self.swapping_prob
+            swapped_idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
+            swapped_idx = np.where(np.random.rand(size) < self.swapping_prob, idx, swapped_idx)
+            swapped_labels = torch.Tensor(self.dataset.labels[swapped_idx]).to(self.device)
+            return labels, swapped_labels
+
+        return labels
 
     def train(self):
         assert exists(self.loader), 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
@@ -1301,6 +1414,9 @@ class Trainer():
         G = self.GAN.G if not self.is_ddp else self.G_ddp
         D = self.GAN.D if not self.is_ddp else self.D_ddp
         D_aug = self.GAN.D_aug if not self.is_ddp else self.D_aug_ddp
+        if self.supervision == 'discriminator':
+            target_D = self.GAN.target_D if not self.is_ddp else self.target_D_ddp
+            target_D_aug = self.GAN.target_D_aug if not self.is_ddp else self.target_D_aug_ddp
 
         apply_gradient_penalty = self.steps % 4 == 0
 
@@ -1313,22 +1429,41 @@ class Trainer():
         else:
             D_loss_fn = hinge_loss
 
+        # semi-supervision conditions
+        # TODO : check conditions
+        view_supervision_cond = (self.target_loader and self.supervision == 'view') # and self.steps % self.data_ratio == 0)
+        disc_supervision_cond = (self.target_loader and self.supervision == 'discriminator') #  and self.steps % self.data_ratio == 0)
+        ddps_list = [D_aug, G]
+        if disc_supervision_cond:
+            ddps_list = [D_aug, target_D_aug, G]
+
         # train discriminator
         self.GAN.D_opt.zero_grad()
-        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D_aug, G]):
+        if disc_supervision_cond:
+            self.GAN.target_D_opt.zero_grad()
+
+        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=ddps_list):
             latents = torch.randn(batch_size, latent_dim).to(self.device)
-            image_batch = next(self.loader).to(self.device)
+            if self.labels:
+                image_batch, label_batch = next(self.loader)
+                image_batch = image_batch.to(self.device)
+                label_batch = label_batch.to(self.device)
+            else:
+                image_batch = next(self.loader).to(self.device)
+                label_batch = None
             image_batch.requires_grad_()
 
             with amp_context():
                 with torch.no_grad():
-                    generated_images = G(latents)
+                    sampled_labels, swapped_sampled_labels = self.sample_label(batch_size, True) if self.labels else (None, None)
+                    generated_images = G(latents, label=swapped_sampled_labels)
                     if self.render:
-                        generated_images = self.rendering.render(generated_images)
+                        target_fake_images = generated_images.clone()
+                        generated_images = self.rendering.render(generated_images, label=sampled_labels)
 
-                fake_output, fake_output_32x32, _ = D_aug(generated_images, detach = True, **aug_kwargs)
+                fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
 
-                real_output, real_output_32x32, real_aux_loss = D_aug(image_batch,  calc_aux_loss = True, **aug_kwargs)
+                real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, labels=label_batch, calc_aux_loss=True, **aug_kwargs)
 
                 real_output_loss = real_output
                 fake_output_loss = fake_output
@@ -1337,9 +1472,28 @@ class Trainer():
                 divergence_32x32 = D_loss_fn(real_output_32x32, fake_output_32x32)
                 disc_loss = divergence + divergence_32x32
 
+                # discriminator superivision loss
+                if disc_supervision_cond:
+                    target_image_batch = next(self.target_loader).to(self.device)
+                    image_batch.requires_grad_()
+
+                    target_fake_output, target_fake_output_32x32, _ = target_D_aug(target_fake_images, detach=True, **aug_kwargs)
+
+                    target_real_output, target_real_output_32x32, target_real_aux_loss = target_D_aug(image_batch, calc_aux_loss=True, **aug_kwargs)
+
+                    target_real_output_loss = target_real_output
+                    target_fake_output_loss = target_fake_output
+
+                    target_divergence = D_loss_fn(target_real_output_loss, target_fake_output_loss)
+                    target_divergence_32x32 = D_loss_fn(target_real_output_32x32, target_fake_output_32x32)
+                    disc_target_loss = target_divergence + target_divergence_32x32
+
                 aux_loss = real_aux_loss
                 disc_loss = disc_loss + aux_loss
+                if disc_supervision_cond:
+                    disc_loss = disc_loss + disc_target_loss + target_real_aux_loss
 
+             # TODO : apply gradient penalty to target data as well
             if apply_gradient_penalty:
                 outputs = [real_output, real_output_32x32]
                 outputs = list(map(self.D_scaler.scale, outputs)) if self.amp else outputs
@@ -1371,6 +1525,8 @@ class Trainer():
         self.last_recon_loss = aux_loss.item()
         self.d_loss = float(total_disc_loss.item() / self.gradient_accumulate_every)
         self.D_scaler.step(self.GAN.D_opt)
+        if disc_supervision_cond:
+            self.D_scaler.step(self.GAN.target_D_opt)
         self.D_scaler.update()
 
         # generator loss fn
@@ -1384,25 +1540,42 @@ class Trainer():
         # train generator
         self.GAN.G_opt.zero_grad()
 
-        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D_aug]):
+        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=ddps_list):
             latents = torch.randn(batch_size, latent_dim).to(self.device)
 
             if G_requires_calc_real:
-                image_batch = next(self.loader).to(self.device)
+                if self.labels:
+                    image_batch, label_batch = next(self.loader)
+                    image_batch = image_batch.to(self.device)
+                    label_batch = label_batch.to(self.device)
+                else:
+                    image_batch = next(self.loader).to(self.device)
+                    label_batch = None
                 image_batch.requires_grad_()
 
             with amp_context():
-                generated_images = G(latents)
+                sampled_labels, swapped_sampled_labels = self.sample_label(batch_size, True) if self.labels else (None, None)
+                generated_images = G(latents, label=swapped_sampled_labels)
                 if self.render:
-                    generated_images = self.rendering.render(generated_images)
+                    target_fake_images = generated_images.clone()
+                    generated_images = self.rendering.render(generated_images, label=sampled_labels)
 
-                fake_output, fake_output_32x32, _ = D_aug(generated_images, **aug_kwargs)
-                real_output, real_output_32x32, _ = D_aug(image_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
+                fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, **aug_kwargs)
+                real_output, real_output_32x32, _ = D_aug(image_batch, labels=label_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
 
                 loss = G_loss_fn(fake_output, real_output)
                 loss_32x32 = G_loss_fn(fake_output_32x32, real_output_32x32)
 
                 gen_loss = loss + loss_32x32
+
+                # TODO : get rid of view superivision
+                # view superivision loss
+                if view_supervision_cond:
+                    target_image_batch = next(self.target_loader).to(self.device)
+                    image_batch.requires_grad_()
+
+                    target_generated_images = self.rendering.render(target_fake_images)
+                    gen_loss = gen_loss + self.supervision_loss(target_generated_images, target_image_batch)
 
                 gen_loss = gen_loss / self.gradient_accumulate_every
 
@@ -1597,7 +1770,12 @@ class Trainer():
             os.makedirs(real_path)
 
             for batch_num in tqdm(range(num_batches), desc='calculating FID - saving reals'):
-                real_batch = next(self.loader)
+                # TODO : check whether to device can be used (perhaps memory on cpu is required?)
+                if self.labels:
+                    real_batch, _ = next(self.loader)
+                    real_batch = real_batch # .to(self.device)
+                else:
+                    real_batch = next(self.loader) # .to(self.device)
                 for k, image in enumerate(real_batch.unbind(0)):
                     ind = k + batch_num * self.batch_size
                     torchvision.utils.save_image(image, real_path / f'{ind}.png')
@@ -1627,8 +1805,10 @@ class Trainer():
         return fid_score.calculate_fid_given_paths([str(real_path), str(fake_path)], 256, latents.device, 2048)
 
     @torch.no_grad()
-    def generate_(self, G, style, num_image_tiles = 8):
-        generated_images = evaluate_in_chunks(self.batch_size, G, self.nomapping, True, style) # no style mixing regularization (nomixing=True) during evaluation
+    def generate_(self, G, style, num_image_tiles=8):
+        label = self.sample_label(style.shape[0]) if self.labels else None
+        arguments = (style, label) if self.labels else (style,)
+        generated_images = evaluate_in_chunks(self.batch_size, G, self.nomapping, True, *arguments) # no style mixing regularization (nomixing=True) during evaluation
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
