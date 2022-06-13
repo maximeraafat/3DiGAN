@@ -644,7 +644,11 @@ class Generator(nn.Module):
             self.siren = Siren(in_features = latent_dim, out_features = latent_dim, hidden_features = latent_dim, hidden_layers = 2, outermost_linear = True)
             self.linear = nn.Linear(latent_dim, 1024) # affine transformation of SIREN output
         if labels:
-            self.cond_fc = nn.Linear(2, latent_dim//2) # TODO : extend to more than 2 labels
+            self.cond_fc = nn.Sequential(
+                nn.Linear(2, latent_dim), # TODO : extend to more than 2 labels
+                nn.BatchNorm1d(latent_dim),
+                nn.GLU(dim = 1)
+            )
 
         self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
 
@@ -905,19 +909,26 @@ class Discriminator(nn.Module):
         self.decoder2 = SimpleDecoder(chan_in=features[-2][-1], chan_out=init_channel) if resolution >= 9 else None
 
         if labels:
-            self.cond_fc = nn.Linear(2, fmap_max//2) # TODO : extend to more than 2 labels
+            self.cond_fc = nn.Sequential(
+                nn.Linear(2, fmap_max), # TODO : extend to more than 2 labels
+                nn.LeakyReLU(0.1)
+            )
 
-    def conditioned_output(self, output, label):
-        label = self.cond_fc(label)
-        label = F.normalize(label, dim=1)
-        output_shape = output.shape
-        output = output.reshape(output_shape[:2])
-        output = (output * label).sum(dim=1, keepdim=True) * (1 / np.sqrt(label.shape[-1]))
-        output = output.reshape(output_shape)
+            self.cond_fc32 = nn.Sequential(
+                nn.Linear(2, 32 * 32), # TODO : extend to more than 2 labels
+                nn.LeakyReLU(0.1)
+            )
+
+    def conditioned_output(self, output, label, out32=False):
+        b, c, w, h = output.shape
+        label = self.cond_fc32(label) if out32 else self.cond_fc(label)
+        label = label.reshape(b, 1, w, h) if out32 else label.reshape(b, c, 1, 1)
+        output = output * label * (1 / np.sqrt(label.shape[1]))
         return output
 
     def forward(self, x, label=None, calc_aux_loss=False):
         orig_img = x
+        img_32x32 = F.interpolate(orig_img, size=(32, 32))
 
         for layer in self.non_residual_layers:
             x = layer(x)
@@ -931,14 +942,12 @@ class Discriminator(nn.Module):
             x = net(x)
             layer_outputs.append(x)
 
-        out = self.to_logits(x).flatten(1)
-
-        img_32x32 = F.interpolate(orig_img, size=(32, 32))
-        out_32x32 = self.to_shape_disc_out(img_32x32)
-
         if label is not None:
-            out = self.conditioned_output(out, label)
-            out_32x32 = self.conditioned_output(out_32x32, label)
+            x = self.conditioned_output(x, label)
+            img_32x32 = self.conditioned_output(img_32x32, label, out32=True)
+
+        out = self.to_logits(x).flatten(1)
+        out_32x32 = self.to_shape_disc_out(img_32x32)
 
         if not calc_aux_loss:
             return out, out_32x32, None
@@ -1178,7 +1187,7 @@ class Trainer():
         self.supervision = supervision
         self.labels = labels
 
-        self.swapping_prob = 0.5
+        self.swapping_prob = 0 # TODO : delete if regularization not needed
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
 
