@@ -42,7 +42,7 @@ class Rendering():
         sigma = 1e-7,
         gamma = 1e-7,
         faces_per_pixel = 1,
-        points_per_pixel = 40,
+        points_per_pixel = 20,
         point_radius = 0.01,
         transparent = False,
         rank = 0
