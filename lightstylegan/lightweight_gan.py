@@ -41,7 +41,7 @@ if not torch.cuda.is_available():
 
 # constants
 NUM_CORES = multiprocessing.cpu_count()
-EXTS = ['jpg', 'jpeg', 'png']
+EXTS = ['jpg', 'jpeg', 'png', 'tiff']
 
 ## helpers
 
@@ -1659,8 +1659,8 @@ class Trainer():
                 alpha = idx / (len(grouped) - 1)
                 aim_images = []
                 for image in images:
-                    im = image_to_pil(image)
-                    aim_images.append(self.aim.Image(im, caption=f'#{idx}'))
+                    img = image_to_pil(image)
+                    aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
 
                 self.run.track(value=aim_images, name='generated',
                                step=self.steps,
@@ -1675,7 +1675,7 @@ class Trainer():
             aim_images = []
             for idx, image in enumerate(generated_images):
                 img = image_to_pil(image)
-                aim_images.append(self.aim.Image(im, caption=f'#{idx}'))
+                aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
 
             self.run.track(value=aim_images, name='generated',
                            step=self.steps,
@@ -1683,6 +1683,15 @@ class Trainer():
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
         if self.render:
             rendered_images = self.rendering.render(generated_images)
+            if self.run is not None:
+                aim_images = []
+                for idx, image in enumerate(rendered_images):
+                    img = image_to_pil(image)
+                    aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
+
+                self.run.track(value=aim_images, name='rendered_generated',
+                               step=self.steps,
+                               context={'ema': False})
             torchvision.utils.save_image(rendered_images, str(self.results_dir / self.name / f'{str(num)}_rendered.{ext}'), nrow=num_rows)
 
         # moving averages
@@ -1690,8 +1699,8 @@ class Trainer():
         if self.run is not None:
             aim_images = []
             for idx, image in enumerate(generated_images):
-                im = image_to_pil(image)
-                aim_images.append(self.aim.Image(im, caption=f'EMA #{idx}'))
+                img = image_to_pil(image)
+                aim_images.append(self.aim.Image(img, caption=f'EMA #{idx}'))
 
             self.run.track(value=aim_images, name='generated',
                            step=self.steps,
@@ -1699,6 +1708,15 @@ class Trainer():
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
         if self.render:
             rendered_images = self.rendering.render(generated_images)
+            if self.run is not None:
+                aim_images = []
+                for idx, image in enumerate(rendered_images):
+                    img = image_to_pil(image)
+                    aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
+
+                self.run.track(value=aim_images, name='rendered_generated',
+                               step=self.steps,
+                               context={'ema': True})
             torchvision.utils.save_image(rendered_images, str(self.results_dir / self.name / f'{str(num)}-ema_rendered.{ext}'), nrow=num_rows)
 
     @torch.no_grad()
