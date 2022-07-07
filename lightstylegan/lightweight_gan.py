@@ -1453,6 +1453,7 @@ class Trainer():
 
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=ddps_list):
             latents = torch.randn(batch_size, latent_dim).to(self.device)
+
             if self.labels:
                 image_batch, label_batch = next(self.loader)
                 image_batch = image_batch.to(self.device)
@@ -1518,7 +1519,7 @@ class Trainer():
 
                     with amp_context():
                         gradients = gradients.reshape(batch_size, -1)
-                        gp =  self.gp_weight * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+                        gp = self.gp_weight * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
 
                         if not torch.isnan(gp):
                             disc_loss = disc_loss + gp

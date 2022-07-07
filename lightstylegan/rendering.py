@@ -42,7 +42,7 @@ class Rendering():
         sigma = 1e-7,
         gamma = 1e-7,
         faces_per_pixel = 1,
-        points_per_pixel = 50,
+        points_per_pixel = 30,
         point_radius = 0.01,
         transparent = False,
         rank = 0
@@ -61,8 +61,8 @@ class Rendering():
         self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         # mesh and smplx uv .obj paths
-        self.mesh_obj_path = 'rp_simplified.obj'
-        self.smplx_uv_path = 'rp_simplified.obj'
+        self.mesh_obj_path = 'cow.obj'
+        self.smplx_uv_path = 'cow.obj'
 
         # camera view settings
         self.azimuths = np.arange(-180, 180, 1)
