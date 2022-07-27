@@ -120,11 +120,17 @@ def safe_div(n, d):
 
 ## loss functions
 
-def gen_hinge_loss(fake, real):
+def gen_hinge_loss(real, fake):
     return fake.mean()
 
 def hinge_loss(real, fake):
-    return (F.relu(1 + real) + F.relu(1 - fake)).mean()
+    return ( F.relu(1 + real) + F.relu(1 - fake) ).mean()
+
+def smooth_hinge_loss(real, fake):
+    return ( F.relu(torch.rand_like(real) * 0.2 + 0.8 - real) + F.relu(torch.rand_like(fake) * 0.2 + 0.8 + fake) ).mean()
+
+def gen_smooth_hinge_loss(real, fake):
+    return -fake.mean()
 
 def dual_contrastive_loss(real_logits, fake_logits):
     device = real_logits.device
@@ -450,8 +456,34 @@ class AugWrapper(nn.Module):
 # modifiable global variables
 norm_class = nn.BatchNorm2d
 
-def upsample(scale_factor = 2):
-    return nn.Upsample(scale_factor = scale_factor)
+# def upsample(scale_factor = 2):
+#     return nn.Upsample(scale_factor = scale_factor)
+
+class PixelShuffleUpsample(nn.Module):
+    def __init__(self, dim, dim_out = None):
+        super().__init__()
+        dim_out = default(dim_out, dim)
+        conv = nn.Conv2d(dim, dim_out * 4, 1)
+
+        self.net = nn.Sequential(
+            conv,
+            nn.SiLU(),
+            nn.PixelShuffle(2)
+        )
+
+        self.init_conv_(conv)
+
+    def init_conv_(self, conv):
+        o, i, h, w = conv.weight.shape
+        conv_weight = torch.empty(o // 4, i, h, w)
+        nn.init.kaiming_uniform_(conv_weight)
+        conv_weight = repeat(conv_weight, 'o ... -> (o 4) ...')
+
+        conv.weight.data.copy_(conv_weight)
+        nn.init.zeros_(conv.bias.data)
+
+    def forward(self, x):
+        return self.net(x)
 
 ## squeeze excitation classes
 
@@ -627,9 +659,11 @@ class Generator(nn.Module):
 
             layer = nn.ModuleList([
                 nn.Sequential(
-                    upsample(),
+                    # upsample(),
+                    PixelShuffleUpsample(chan_in, chan_out),
                     Blur(),
-                    Conv2dSame(chan_in, chan_out * 2, 4),
+                    # Conv2dSame(chan_in, chan_out * 2, 4),
+                    Conv2dSame(chan_out, chan_out * 2, 4),
                     Noise(),
                     norm_class(chan_out * 2),
                     nn.GLU(dim = 1)
@@ -775,8 +809,10 @@ class SimpleDecoder(nn.Module):
             last_layer = ind == (num_upsamples - 1)
             chan_out = chans if not last_layer else final_chan * 2
             layer = nn.Sequential(
-                upsample(),
-                nn.Conv2d(chans, chan_out, 3, padding = 1),
+                # upsample(),
+                # nn.Conv2d(chans, chan_out, 3, padding = 1),
+                PixelShuffleUpsample(chans, chan_out),
+                nn.Conv2d(chan_out, chan_out, 3, padding = 1),
                 nn.GLU(dim = 1)
             )
             self.layers.append(layer)
@@ -796,6 +832,7 @@ class Discriminator(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
+        render = False,
         labels = False,
         disc_output_size = 5,
         attn_res_layers = []
@@ -871,6 +908,7 @@ class Discriminator(nn.Module):
         if disc_output_size == 5:
             self.to_logits = nn.Sequential(
                 nn.Conv2d(last_chan, last_chan, 1),
+                nn.Dropout(0.4),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -878,6 +916,7 @@ class Discriminator(nn.Module):
             self.to_logits = nn.Sequential(
                 Blur(),
                 nn.Conv2d(last_chan, last_chan, 3, stride = 2, padding = 1),
+                nn.Dropout(0.4),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -891,12 +930,14 @@ class Discriminator(nn.Module):
                     nn.Conv2d(64, 32, 4, stride = 2, padding = 1),
                     nn.LeakyReLU(0.1),
                     nn.Conv2d(32, 32, 3, padding = 1),
+                    nn.Dropout(0.4),
                     nn.LeakyReLU(0.1)
                 ),
                 nn.Sequential(
                     Blur(),
                     nn.AvgPool2d(2),
                     nn.Conv2d(64, 32, 1),
+                    nn.Dropout(0.4),
                     nn.LeakyReLU(0.1),
                 )
             ]),
@@ -1035,6 +1076,7 @@ class LightweightGAN(nn.Module):
             transparent = transparent,
             greyscale = greyscale,
             labels = labels,
+            render = render,
             attn_res_layers = attn_res_layers,
             disc_output_size = disc_output_size
         )
@@ -1393,9 +1435,9 @@ class Trainer():
         labels = torch.Tensor(self.dataset.labels[idx]).to(self.device)
 
         if swapping:
-            # swap labels for which label[i] does not satisfy random[i] < self.swapping_prob
+            # swap labels for which label[i] satisfies random[i] > self.swapping_prob
             swapped_idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
-            swapped_idx = np.where(np.random.rand(size) < self.swapping_prob, idx, swapped_idx)
+            swapped_idx = np.where(np.random.rand(size) > self.swapping_prob, idx, swapped_idx)
             swapped_labels = torch.Tensor(self.dataset.labels[swapped_idx]).to(self.device)
             return labels, swapped_labels
 
@@ -1407,7 +1449,7 @@ class Trainer():
         if not exists(self.GAN):
             self.init_GAN()
 
-        self.GAN.train()
+        self.GAN.train() # TODO : what does this do?
         total_disc_loss = torch.zeros([], device=self.device)
         total_gen_loss = torch.zeros([], device=self.device)
 
@@ -1437,6 +1479,9 @@ class Trainer():
             D_loss_fn = dual_contrastive_loss
         else:
             D_loss_fn = hinge_loss
+
+        if self.render:
+            D_loss_fn = smooth_hinge_loss
 
         # semi-supervision conditions
         # TODO : check conditions
@@ -1472,7 +1517,6 @@ class Trainer():
                         generated_images = self.rendering.render(generated_images, label=sampled_labels)
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
-
                 real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, labels=label_batch, calc_aux_loss=True, **aug_kwargs)
 
                 real_output_loss = real_output
@@ -1547,6 +1591,9 @@ class Trainer():
             G_loss_fn = gen_hinge_loss
             G_requires_calc_real = False
 
+        if self.render:
+            D_loss_fn = gen_smooth_hinge_loss
+
         # train generator
         self.GAN.G_opt.zero_grad()
 
@@ -1573,8 +1620,8 @@ class Trainer():
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, **aug_kwargs)
                 real_output, real_output_32x32, _ = D_aug(image_batch, labels=label_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
 
-                loss = G_loss_fn(fake_output, real_output)
-                loss_32x32 = G_loss_fn(fake_output_32x32, real_output_32x32)
+                loss = G_loss_fn(real_output, fake_output)
+                loss_32x32 = G_loss_fn(real_output_32x32, fake_output_32x32)
 
                 gen_loss = loss + loss_32x32
 
