@@ -1449,7 +1449,7 @@ class Trainer():
         if not exists(self.GAN):
             self.init_GAN()
 
-        self.GAN.train() # TODO : what does this do?
+        self.GAN.train() # TODO : what does this do?
         total_disc_loss = torch.zeros([], device=self.device)
         total_gen_loss = torch.zeros([], device=self.device)
 
