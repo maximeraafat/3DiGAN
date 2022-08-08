@@ -908,7 +908,7 @@ class Discriminator(nn.Module):
         if disc_output_size == 5:
             self.to_logits = nn.Sequential(
                 nn.Conv2d(last_chan, last_chan, 1),
-                nn.Dropout(0.4),
+                nn.Dropout(0.2),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -916,7 +916,7 @@ class Discriminator(nn.Module):
             self.to_logits = nn.Sequential(
                 Blur(),
                 nn.Conv2d(last_chan, last_chan, 3, stride = 2, padding = 1),
-                nn.Dropout(0.4),
+                nn.Dropout(0.2),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -930,14 +930,14 @@ class Discriminator(nn.Module):
                     nn.Conv2d(64, 32, 4, stride = 2, padding = 1),
                     nn.LeakyReLU(0.1),
                     nn.Conv2d(32, 32, 3, padding = 1),
-                    nn.Dropout(0.4),
+                    # nn.Dropout(0.4),
                     nn.LeakyReLU(0.1)
                 ),
                 nn.Sequential(
                     Blur(),
                     nn.AvgPool2d(2),
                     nn.Conv2d(64, 32, 1),
-                    nn.Dropout(0.4),
+                    # nn.Dropout(0.4),
                     nn.LeakyReLU(0.1),
                 )
             ]),
