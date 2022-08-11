@@ -127,7 +127,9 @@ def hinge_loss(real, fake):
     return ( F.relu(1 + real) + F.relu(1 - fake) ).mean()
 
 def smooth_hinge_loss(real, fake):
-    return ( F.relu(torch.rand_like(real) * 0.2 + 0.8 - real) + F.relu(torch.rand_like(fake) * 0.2 + 0.8 + fake) ).mean()
+    smoothing_real = torch.rand_like(real) * 0.2 + 0.8
+    smoothing_fake = torch.rand_like(fake) * 0.2 + 0.8
+    return ( F.relu(smoothing_real - real) + F.relu(smoothing_fake + fake) ).mean()
 
 def gen_smooth_hinge_loss(real, fake):
     return -fake.mean()
@@ -1590,7 +1592,7 @@ class Trainer():
             G_requires_calc_real = False
 
         if self.render:
-            D_loss_fn = gen_smooth_hinge_loss
+            G_loss_fn = gen_smooth_hinge_loss
 
         # train generator
         self.GAN.G_opt.zero_grad()
