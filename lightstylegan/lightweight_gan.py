@@ -1478,10 +1478,12 @@ class Trainer():
         if self.dual_contrast_loss:
             D_loss_fn = dual_contrastive_loss
         else:
-            D_loss_fn = hinge_loss
-
-        if self.render:
+            # D_loss_fn = hinge_loss
             D_loss_fn = smooth_hinge_loss
+
+        # TODO
+        # if self.render:
+        #     D_loss_fn = smooth_hinge_loss
 
         # semi-supervision conditions
         # TODO : check conditions
@@ -1588,11 +1590,13 @@ class Trainer():
             G_loss_fn = dual_contrastive_loss
             G_requires_calc_real = True
         else:
-            G_loss_fn = gen_hinge_loss
+            # G_loss_fn = gen_hinge_loss
+            G_loss_fn = gen_smooth_hinge_loss
             G_requires_calc_real = False
 
-        if self.render:
-            G_loss_fn = gen_smooth_hinge_loss
+        # TODO
+        # if self.render:
+        #    G_loss_fn = gen_smooth_hinge_loss
 
         # train generator
         self.GAN.G_opt.zero_grad()
