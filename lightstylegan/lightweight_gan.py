@@ -121,18 +121,14 @@ def safe_div(n, d):
 ## loss functions
 
 def gen_hinge_loss(real, fake):
-    return fake.mean()
-
-def hinge_loss(real, fake):
-    return ( F.relu(1 + real) + F.relu(1 - fake) ).mean()
-
-def smooth_hinge_loss(real, fake):
-    smoothing_real = torch.rand_like(real) * 0.2 + 0.8
-    smoothing_fake = torch.rand_like(fake) * 0.2 + 0.8
-    return ( F.relu(smoothing_real - real) + F.relu(smoothing_fake + fake) ).mean()
-
-def gen_smooth_hinge_loss(real, fake):
     return -fake.mean()
+    # return fake.mean() # lucidrains implementation
+
+def hinge_loss(real, fake, smoothing=0):
+    smoothing_real = torch.rand_like(real) * smoothing + (1 - smoothing)
+    smoothing_fake = torch.rand_like(fake) * smoothing + (1 - smoothing)
+    return ( F.relu(smoothing_real - real) + F.relu(smoothing_fake + fake) ).mean()
+    # return ( F.relu(1 + real) + F.relu(1 - fake) ).mean() # lucidrains implementation
 
 def dual_contrastive_loss(real_logits, fake_logits):
     device = real_logits.device
@@ -1161,6 +1157,7 @@ class Trainer():
         fourier = False,
         render = False,
         labels = False,
+        smoothing = 0,
         supervision = 'discriminator',
         batch_size = 4,
         gp_weight = 10,
@@ -1228,10 +1225,12 @@ class Trainer():
         self.render = render
         self.supervision = supervision
         self.labels = labels
+        self.smoothing = smoothing
 
         self.swapping_prob = 0 # TODO : delete if regularization not needed
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
+        assert self.smoothing >= 0 and self.smoothing <= 1, 'label smoothing has to be between 0 and 1'
 
         self.aug_prob = aug_prob
         self.aug_types = aug_types
@@ -1478,12 +1477,7 @@ class Trainer():
         if self.dual_contrast_loss:
             D_loss_fn = dual_contrastive_loss
         else:
-            # D_loss_fn = hinge_loss
-            D_loss_fn = smooth_hinge_loss
-
-        # TODO
-        # if self.render:
-        #     D_loss_fn = smooth_hinge_loss
+            D_loss_fn = hinge_loss
 
         # semi-supervision conditions
         # TODO : check conditions
@@ -1524,8 +1518,12 @@ class Trainer():
                 real_output_loss = real_output
                 fake_output_loss = fake_output
 
-                divergence = D_loss_fn(real_output_loss, fake_output_loss)
-                divergence_32x32 = D_loss_fn(real_output_32x32, fake_output_32x32)
+                if self.dual_contrast_loss:
+                    divergence = D_loss_fn(real_output_loss, fake_output_loss)
+                    divergence_32x32 = D_loss_fn(real_output_32x32, fake_output_32x32)
+                else:
+                    divergence = D_loss_fn(real_output_loss, fake_output_loss, smoothing=self.render*self.smoothing)
+                    divergence_32x32 = D_loss_fn(real_output_32x32, fake_output_32x32, smoothing=self.render*self.smoothing)
                 disc_loss = divergence + divergence_32x32
 
                 # discriminator superivision loss
@@ -1590,13 +1588,8 @@ class Trainer():
             G_loss_fn = dual_contrastive_loss
             G_requires_calc_real = True
         else:
-            # G_loss_fn = gen_hinge_loss
-            G_loss_fn = gen_smooth_hinge_loss
+            G_loss_fn = gen_hinge_loss
             G_requires_calc_real = False
-
-        # TODO
-        # if self.render:
-        #    G_loss_fn = gen_smooth_hinge_loss
 
         # train generator
         self.GAN.G_opt.zero_grad()
