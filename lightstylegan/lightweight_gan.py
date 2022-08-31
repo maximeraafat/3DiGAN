@@ -906,7 +906,7 @@ class Discriminator(nn.Module):
         if disc_output_size == 5:
             self.to_logits = nn.Sequential(
                 nn.Conv2d(last_chan, last_chan, 1),
-                # nn.Dropout(0.1),
+                nn.Dropout(0.1),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -914,7 +914,7 @@ class Discriminator(nn.Module):
             self.to_logits = nn.Sequential(
                 Blur(),
                 nn.Conv2d(last_chan, last_chan, 3, stride = 2, padding = 1),
-                # nn.Dropout(0.1),
+                nn.Dropout(0.1),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -934,7 +934,7 @@ class Discriminator(nn.Module):
                     Blur(),
                     nn.AvgPool2d(2),
                     nn.Conv2d(64, 32, 1),
-                    nn.LeakyReLU(0.1),
+                    nn.LeakyReLU(0.1)
                 )
             ]),
             Residual(PreNorm(32, LinearAttention(32))),
@@ -1158,6 +1158,7 @@ class Trainer():
         render = False,
         labels = False,
         smoothing = 0,
+        noise = 0,
         supervision = 'discriminator',
         batch_size = 4,
         gp_weight = 10,
@@ -1226,6 +1227,7 @@ class Trainer():
         self.supervision = supervision
         self.labels = labels
         self.smoothing = smoothing
+        self.noise = noise
 
         self.swapping_prob = 0 # TODO : delete if regularization not needed
 
@@ -1511,6 +1513,9 @@ class Trainer():
                     if self.render:
                         target_fake_images = generated_images.clone()
                         generated_images = self.rendering.render(generated_images, label=sampled_labels)
+                # instance noise
+                generated_images = generated_images + self.noise * torch.randn(generated_images.shape).to(self.device)
+                image_batch = image_batch + self.noise * torch.randn(image_batch.shape).to(self.device)
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
                 real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, labels=label_batch, calc_aux_loss=True, **aug_kwargs)

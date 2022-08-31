@@ -10,6 +10,7 @@ from pytorch3d.renderer import TexturesUV
 from pytorch3d.renderer import (
     look_at_view_transform,
     OrthographicCameras,
+    PerspectiveCameras,
     RasterizationSettings,
     PointsRasterizationSettings,
     MeshRenderer,
@@ -43,7 +44,7 @@ class Rendering():
         gamma = 1e-7,
         faces_per_pixel = 1,
         points_per_pixel = 30,
-        point_radius = 0.01,
+        point_radius = 0.002, # TODO : optimal for cow rendering = 0.005
         transparent = False,
         rank = 0
     ):
@@ -61,8 +62,8 @@ class Rendering():
         self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         # mesh and smplx uv .obj paths
-        self.mesh_obj_path = 'cow.obj'
-        self.smplx_uv_path = 'cow.obj'
+        self.mesh_obj_path = 'mesh.obj'
+        self.smplx_uv_path = 'mesh.obj'
 
         # camera view settings
         self.azimuths = np.arange(-180, 180, 1)
@@ -123,7 +124,8 @@ class Rendering():
 
     def get_mesh(self, mesh_obj_path, batch_size):
         verts, faces, properties = load_obj(mesh_obj_path, load_textures=False)
-        verts = normalize_verts( verts.unsqueeze(0) )
+        # verts = normalize_verts( verts.unsqueeze(0) )
+        verts = verts.unsqueeze(0)
         faces = faces.verts_idx.unsqueeze(0)
         verts = verts.repeat(batch_size, 1, 1) # shape = (b, num_verts, 3)
         faces = faces.repeat(batch_size, 1, 1) # shape = (b, num_faces, 3)
@@ -146,13 +148,13 @@ class Rendering():
         return Meshes(mesh.verts_padded(), mesh.faces_padded(), texture_uv).to(self.device)
 
     # See SMPL-A forward : https://gist.github.com/sergeyprokudin/d9c27822ceccff8de9830fb09202d7cf
-    def get_pointcloud(self, mesh, num_samples=10**5):
+    def get_pointcloud(self, mesh, num_samples=10**5): # TODO : optimal for cow rendering=10**6
         points_xyz, points_norms, points_text = sample_points_from_meshes(mesh, num_samples=num_samples, return_normals=True, return_textures=True)
 
         if points_text.shape[2] > 3:
             points_xyz += points_norms * points_text[:,:,3:4].tile([1, 1, 3])
 
-        return Pointclouds(points=points_xyz, features=points_text[:,:,0:3])# points_xyz, points_norms, points_text
+        return Pointclouds(points=points_xyz, features=points_text[:,:,0:3])
 
     def render(self, texture, label=None):
         b = texture.shape[0] # batch size
@@ -161,12 +163,13 @@ class Rendering():
         mesh = self.get_mesh(self.mesh_obj_path, b)
         textured_mesh = self.get_textured_mesh(mesh, uvs, texture)
 
-        azim = np.random.choice(self.azimuths, b, replace=True) if label is None else label[:,0]
-        elev = np.random.choice(self.elevations, b, replace=True, p=self.elev_probs) if label is None else label[:,1]
-        dist = 3
+        azim = 180 # np.random.choice(self.azimuths, b, replace=True) if label is None else label[:,0]
+        elev = 0 # np.random.choice(self.elevations, b, replace=True, p=self.elev_probs) if label is None else label[:,1]
+        dist = 10 # 3
 
         R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
-        cameras = OrthographicCameras(R=R, T=T, device=self.device)
+        # cameras = OrthographicCameras(R=R, T=T, device=self.device)
+        cameras = PerspectiveCameras(focal_length=dist, R=R, T=T, device=self.device)
 
         renderer = self.point_renderer(cameras)
         textured_pcl = self.get_pointcloud(textured_mesh)

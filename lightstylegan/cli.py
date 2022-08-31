@@ -97,6 +97,7 @@ def train_from_folder(
     render = False,
     labels = False,
     smoothing = 0,
+    noise = 0,
     supervision = 'discriminator', # 'discriminator' or 'view'
     batch_size = 8,
     gp_weight = 10,
@@ -164,6 +165,7 @@ def train_from_folder(
         render = render,
         labels = labels,
         smoothing = smoothing,
+        noise = noise,
         supervision = supervision,
         ttur_mult = ttur_mult,
         lr = learning_rate,
