@@ -43,7 +43,7 @@ class Rendering():
         sigma = 1e-7,
         gamma = 1e-7,
         faces_per_pixel = 1,
-        points_per_pixel = 50,
+        points_per_pixel = 30,
         point_radius = 0.01, # TODO : optimal for cow rendering = 0.005
         transparent = False,
         rank = 0
