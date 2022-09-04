@@ -118,6 +118,11 @@ def safe_div(n, d):
         res = float(f'{prefix}inf')
     return res
 
+# linearly decaying function up to end epoch
+def linear_decay(intercept, step, end):
+    coefficient = intercept * (1.0 - step / end)
+    return max(0, coefficient)
+
 ## loss functions
 
 def gen_hinge_loss(real, fake):
@@ -575,6 +580,7 @@ class Generator(nn.Module):
         styling = False,
         fourier = False,
         render = False,
+        displacement = False,
         labels = False,
         attn_res_layers = [],
         freq_chan_attn = False,
@@ -584,7 +590,7 @@ class Generator(nn.Module):
         resolution = log2(image_size)
         assert is_power_of_two(image_size), 'image size must be a power of 2'
 
-        if transparent:
+        if transparent or displacement:
             init_channel = 4
         elif greyscale:
             init_channel = 1
@@ -906,7 +912,7 @@ class Discriminator(nn.Module):
         if disc_output_size == 5:
             self.to_logits = nn.Sequential(
                 nn.Conv2d(last_chan, last_chan, 1),
-                nn.Dropout(0.1),
+                nn.Dropout(0.2),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -914,7 +920,7 @@ class Discriminator(nn.Module):
             self.to_logits = nn.Sequential(
                 Blur(),
                 nn.Conv2d(last_chan, last_chan, 3, stride = 2, padding = 1),
-                nn.Dropout(0.1),
+                nn.Dropout(0.2),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -1031,6 +1037,7 @@ class LightweightGAN(nn.Module):
         styling = False,
         fourier = False,
         render = False,
+        displacement = False,
         labels = False,
         supervision = 'discriminator',
         disc_output_size = 5,
@@ -1057,6 +1064,7 @@ class LightweightGAN(nn.Module):
             styling = styling,
             fourier = fourier,
             render = render,
+            displacement = displacement,
             labels = labels,
             attn_res_layers = attn_res_layers,
             freq_chan_attn = freq_chan_attn,
@@ -1156,6 +1164,7 @@ class Trainer():
         nomapping = False,
         fourier = False,
         render = False,
+        displacement = False,
         labels = False,
         smoothing = 0,
         noise = 0,
@@ -1224,6 +1233,7 @@ class Trainer():
         self.nomapping = nomapping
         self.fourier = fourier
         self.render = render
+        self.displacement = displacement
         self.supervision = supervision
         self.labels = labels
         self.smoothing = smoothing
@@ -1304,7 +1314,8 @@ class Trainer():
 
     @property
     def image_extension(self):
-        return 'jpg' if not self.transparent else 'png'
+        # return 'jpg' if not self.transparent else 'png'
+        return 'jpg' if not self.transparent and not self.displacement else 'png'
 
     @property
     def checkpoint_num(self):
@@ -1344,6 +1355,7 @@ class Trainer():
             styling = self.styling,
             fourier = self.fourier,
             render = self.render,
+            displacement = self.displacement,
             labels = self.labels,
             supervision = self.supervision,
             rank = self.rank,
@@ -1372,6 +1384,7 @@ class Trainer():
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config()))
 
+    # TODO : complete this
     def load_config(self):
         config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
         self.image_size = config['image_size']
@@ -1382,6 +1395,7 @@ class Trainer():
         self.styling = config.pop('styling', False)
         self.fourier = config.pop('fourier', False)
         self.render = config.pop('render', False)
+        self.displacement = config.pop('displacement', False)
         self.labels = config.pop('conditional', False)
         self.supervision = config.pop('supervision', None)
         self.attn_res_layers = config.pop('attn_res_layers', [])
@@ -1391,6 +1405,7 @@ class Trainer():
         del self.GAN
         self.init_GAN()
 
+    # TODO : complete this
     def config(self):
         return {
             'image_size': self.image_size,
@@ -1399,6 +1414,7 @@ class Trainer():
             'styling': self.styling,
             'fourier': self.fourier,
             'render': self.render,
+            'displacement': self.displacement,
             'conditional' : self.labels,
             'supervision': self.supervision, # TODO : needs to be None if no target folder
             'syncbatchnorm': self.syncbatchnorm,
@@ -1514,8 +1530,9 @@ class Trainer():
                         target_fake_images = generated_images.clone()
                         generated_images = self.rendering.render(generated_images, label=sampled_labels)
                 # instance noise
-                generated_images = generated_images + self.noise * torch.randn(generated_images.shape).to(self.device)
-                image_batch = image_batch + self.noise * torch.randn(image_batch.shape).to(self.device)
+                # TODO : 2000 end noise hyperparameter
+                generated_images = generated_images + linear_decay(self.noise, self.steps, 2000) * torch.randn(generated_images.shape).to(self.device)
+                image_batch = image_batch + linear_decay(self.noise, self.steps, 2000) * torch.randn(image_batch.shape).to(self.device)
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
                 real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, labels=label_batch, calc_aux_loss=True, **aug_kwargs)
@@ -1552,7 +1569,7 @@ class Trainer():
                 if disc_supervision_cond:
                     disc_loss = disc_loss + disc_target_loss + target_real_aux_loss
 
-             # TODO : apply gradient penalty to target data as well
+            # TODO : apply gradient penalty to target data as well
             if apply_gradient_penalty:
                 outputs = [real_output, real_output_32x32]
                 outputs = list(map(self.D_scaler.scale, outputs)) if self.amp else outputs
@@ -1617,6 +1634,7 @@ class Trainer():
                 generated_images = G(latents, label=swapped_sampled_labels)
                 if self.render:
                     target_fake_images = generated_images.clone()
+                    displacements_norm = torch.linalg.norm(generated_images[:,-1,:,:].clone())
                     generated_images = self.rendering.render(generated_images, label=sampled_labels)
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, **aug_kwargs)
@@ -1625,7 +1643,7 @@ class Trainer():
                 loss = G_loss_fn(real_output, fake_output)
                 loss_32x32 = G_loss_fn(real_output_32x32, fake_output_32x32)
 
-                gen_loss = loss + loss_32x32
+                gen_loss = loss + loss_32x32 + linear_decay(0.1, self.steps, 2000) * displacements_norm
 
                 # TODO : get rid of view superivision
                 # view superivision loss

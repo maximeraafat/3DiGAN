@@ -43,8 +43,8 @@ class Rendering():
         sigma = 1e-7,
         gamma = 1e-7,
         faces_per_pixel = 1,
-        points_per_pixel = 30,
-        point_radius = 0.002, # TODO : optimal for cow rendering = 0.005
+        points_per_pixel = 50,
+        point_radius = 0.01, # TODO : optimal for cow rendering = 0.005
         transparent = False,
         rank = 0
     ):
@@ -125,12 +125,12 @@ class Rendering():
     def get_mesh(self, mesh_obj_path, batch_size):
         verts, faces, properties = load_obj(mesh_obj_path, load_textures=False)
         # verts = normalize_verts( verts.unsqueeze(0) )
-        verts = verts.unsqueeze(0)
-        faces = faces.verts_idx.unsqueeze(0)
+        verts = verts.unsqueeze(0).to(self.device)
+        faces = faces.verts_idx.unsqueeze(0).to(self.device)
         verts = verts.repeat(batch_size, 1, 1) # shape = (b, num_verts, 3)
         faces = faces.repeat(batch_size, 1, 1) # shape = (b, num_faces, 3)
 
-        return Meshes(verts, faces).to(self.device)
+        return Meshes(verts, faces) #.to(self.device)
 
     def get_smplx_uvs(self, smplx_uv_path, batch_size):
         verts, faces, properties = load_obj(smplx_uv_path, load_textures=False)
@@ -168,8 +168,8 @@ class Rendering():
         dist = 10 # 3
 
         R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
-        # cameras = OrthographicCameras(R=R, T=T, device=self.device)
-        cameras = PerspectiveCameras(focal_length=dist, R=R, T=T, device=self.device)
+        cameras = OrthographicCameras(R=R, T=T, device=self.device)
+        # cameras = PerspectiveCameras(focal_length=dist, R=R, T=T, device=self.device)
 
         renderer = self.point_renderer(cameras)
         textured_pcl = self.get_pointcloud(textured_mesh)
