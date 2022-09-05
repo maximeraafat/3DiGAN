@@ -1643,7 +1643,9 @@ class Trainer():
                 loss = G_loss_fn(real_output, fake_output)
                 loss_32x32 = G_loss_fn(real_output_32x32, fake_output_32x32)
 
-                gen_loss = loss + loss_32x32 + linear_decay(0.1, self.steps, 2000) * displacements_norm
+                gen_loss = loss + loss_32x32
+                if self.displacement:
+                    gen_loss = gen_loss + linear_decay(1.0, self.steps, 2000) * displacements_norm
 
                 # TODO : get rid of view superivision
                 # view superivision loss
