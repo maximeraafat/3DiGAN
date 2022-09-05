@@ -15,6 +15,7 @@ from pytorch3d.renderer import (
     PointsRasterizationSettings,
     MeshRenderer,
     PointsRenderer,
+    PulsarPointsRenderer,
     MeshRasterizer,
     PointsRasterizer,
     HardPhongShader,
@@ -44,7 +45,7 @@ class Rendering():
         gamma = 1e-7,
         faces_per_pixel = 1,
         points_per_pixel = 10,
-        point_radius = 0.005, # TODO : optimal for cow rendering = 0.005
+        point_radius = 0.0005, # TODO : different point size for OrthographicCameras! ~10x
         transparent = False,
         rank = 0
     ):
