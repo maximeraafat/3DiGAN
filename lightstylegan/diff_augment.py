@@ -11,14 +11,14 @@ def DiffAugment(x, types=[]):
     return x.contiguous()
 
 
-# """
+# '''
 # Augmentation functions got images as `x`
 # where `x` is tensor with this dimensions:
 # 0 - count of images
 # 1 - channels
 # 2 - width
-# 3 - height of image
-# """
+# 3 - height
+# '''
 
 def rand_brightness(x):
     x = x + (torch.rand(x.size(0), 1, 1, 1, dtype=x.dtype, device=x.device) - 0.5)

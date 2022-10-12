@@ -20,7 +20,7 @@ class DummyModel(nn.Module):
 
 
 @torch.no_grad()
-def DiffAugmentTest(image_size = 256, data = './data/0.jpg', types = [], batch_size = 10, rank = 0, nrow = 5):
+def DiffAugmentTest(image_size=256, data='./data/0.jpg', types=[], batch_size=10, rank=0, nrow=5):
     device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
     model = DummyModel()

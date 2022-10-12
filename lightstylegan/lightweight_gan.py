@@ -25,7 +25,6 @@ import torchvision
 from torchvision import transforms
 from kornia.filters import filter2d
 
-from siren import Siren
 from diff_augment import DiffAugment
 from version import __version__
 
@@ -34,6 +33,14 @@ from einops import rearrange, reduce, repeat
 
 from adabelief_pytorch import AdaBelief
 
+# TODO
+# remove unused variables (not just in this file)
+# and comments I created but are useless
+# write requirements.txt file
+
+# TODO
+# use cpu as a fallback for mps unsupported operations
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 # warnings
 if not torch.cuda.is_available():
@@ -44,9 +51,6 @@ NUM_CORES = multiprocessing.cpu_count()
 EXTS = ['jpg', 'jpeg', 'png', 'tiff']
 
 ## helpers
-
-def count_parameters(model, requires_grad=True):
-    return sum( p.numel() for p in model.parameters() if p.requires_grad == requires_grad )
 
 def exists(val):
     return val is not None
@@ -94,14 +98,15 @@ def gradient_accumulate_contexts(gradient_accumulate_every, is_ddp, ddps):
         with context():
             yield
 
-def evaluate_in_chunks(max_batch_size, model, nomapping, nomixing, *args):
+# TODO : if smplx, then second chunked_outputs, otherwise first
+def evaluate_in_chunks(max_batch_size, model, *args):
     split_args = list(zip(*list(map(lambda x: x.split(max_batch_size, dim=0), args))))
-    chunked_outputs = [model(*i, nomapping=nomapping, nomixing=nomixing) for i in split_args]
+    # chunked_outputs = [model(*i) for i in split_args]
+    chunked_outputs = [model(i[0], i[1:]) for i in split_args]
     if len(chunked_outputs) == 1:
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
 
-# spherical linear interpolation
 def slerp(val, low, high):
     low_norm = low / torch.norm(low, dim=1, keepdim=True)
     high_norm = high / torch.norm(high, dim=1, keepdim=True)
@@ -118,22 +123,16 @@ def safe_div(n, d):
         res = float(f'{prefix}inf')
     return res
 
-# linearly decaying function up to end epoch
-def linear_decay(intercept, step, end):
-    coefficient = intercept * (1.0 - step / end)
-    return max(0, coefficient)
 
 ## loss functions
 
 def gen_hinge_loss(real, fake):
-    return -fake.mean()
-    # return fake.mean() # lucidrains implementation
+    return -fake.mean() # lucidrains implementation : fake.mean()
 
 def hinge_loss(real, fake, smoothing=0):
     smoothing_real = torch.rand_like(real) * smoothing + (1 - smoothing)
     smoothing_fake = torch.rand_like(fake) * smoothing + (1 - smoothing)
-    return ( F.relu(smoothing_real - real) + F.relu(smoothing_fake + fake) ).mean()
-    # return ( F.relu(1 + real) + F.relu(1 - fake) ).mean() # lucidrains implementation
+    return ( F.relu(smoothing_real - real) + F.relu(smoothing_fake + fake) ).mean() # lucidrains implementation : ( F.relu(1 + real) + F.relu(1 - fake) ).mean()
 
 def dual_contrastive_loss(real_logits, fake_logits):
     device = real_logits.device
@@ -149,10 +148,10 @@ def dual_contrastive_loss(real_logits, fake_logits):
 
 @lru_cache(maxsize=10)
 def det_randn(*args):
-    """
+    '''
     deterministic random to track the same latent vars (and images) across training steps
     helps to visualize same image over training steps
-    """
+    '''
     return torch.randn(*args)
 
 def interpolate_between(a, b, *, num_samples, dim):
@@ -174,6 +173,7 @@ class EMA():
     def __init__(self, beta):
         super().__init__()
         self.beta = beta
+
     def update_average(self, old, new):
         if not exists(old):
             return new
@@ -185,20 +185,21 @@ class RandomApply(nn.Module):
         self.fn = fn
         self.fn_else = fn_else
         self.prob = prob
+
     def forward(self, x):
         fn = self.fn if random() < self.prob else self.fn_else
         return fn(x)
 
 class ChanNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-5):
+    def __init__(self, dim, eps=1e-5):
         super().__init__()
         self.eps = eps
         self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
         self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
 
     def forward(self, x):
-        var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
-        mean = torch.mean(x, dim = 1, keepdim = True)
+        var = torch.var(x, dim=1, unbiased=False, keepdim=True)
+        mean = torch.mean(x, dim=1, keepdim=True)
         return (x - mean) / (var + self.eps).sqrt() * self.g + self.b
 
 class PreNorm(nn.Module):
@@ -222,6 +223,7 @@ class SumBranches(nn.Module):
     def __init__(self, branches):
         super().__init__()
         self.branches = nn.ModuleList(branches)
+
     def forward(self, x):
         return sum(map(lambda fn: fn(x), self.branches))
 
@@ -230,6 +232,7 @@ class Blur(nn.Module):
         super().__init__()
         f = torch.Tensor([1, 2, 1])
         self.register_buffer('f', f)
+
     def forward(self, x):
         f = self.f
         f = f[None, None, :] * f [None, :, None]
@@ -240,37 +243,36 @@ class Noise(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(1))
 
-    def forward(self, x, noise = None):
+    def forward(self, x, noise=None):
         b, _, h, w, device = *x.shape, x.device
-
         if not exists(noise):
-            noise = torch.randn(b, 1, h, w, device = device)
-
+            noise = torch.randn(b, 1, h, w, device=device)
         return x + self.weight * noise
 
-def Conv2dSame(dim_in, dim_out, kernel_size, bias = True):
+def Conv2dSame(dim_in, dim_out, kernel_size, bias=True):
     pad_left = kernel_size // 2
     pad_right = (pad_left - 1) if (kernel_size % 2) == 0 else pad_left
 
     return nn.Sequential(
         nn.ZeroPad2d((pad_left, pad_right, pad_left, pad_right)),
-        nn.Conv2d(dim_in, dim_out, kernel_size, bias = bias)
+        nn.Conv2d(dim_in, dim_out, kernel_size, bias=bias)
     )
 
 ## attention
 
 class DepthWiseConv2d(nn.Module):
-    def __init__(self, dim_in, dim_out, kernel_size, padding = 0, stride = 1, bias = True):
+    def __init__(self, dim_in, dim_out, kernel_size, padding=0, stride=1, bias=True):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(dim_in, dim_in, kernel_size = kernel_size, padding = padding, groups = dim_in, stride = stride, bias = bias),
-            nn.Conv2d(dim_in, dim_out, kernel_size = 1, bias = bias)
+            nn.Conv2d(dim_in, dim_in, kernel_size=kernel_size, padding=padding, groups=dim_in, stride=stride, bias=bias),
+            nn.Conv2d(dim_in, dim_out, kernel_size=1, bias=bias)
         )
+
     def forward(self, x):
         return self.net(x)
 
 class LinearAttention(nn.Module):
-    def __init__(self, dim, dim_head = 64, heads = 8, kernel_size = 3):
+    def __init__(self, dim, dim_head=64, heads=8, kernel_size=3):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
@@ -280,11 +282,11 @@ class LinearAttention(nn.Module):
         self.kernel_size = kernel_size
         self.nonlin = nn.GELU()
 
-        self.to_lin_q = nn.Conv2d(dim, inner_dim, 1, bias = False)
-        self.to_lin_kv = DepthWiseConv2d(dim, inner_dim * 2, 3, padding = 1, bias = False)
+        self.to_lin_q = nn.Conv2d(dim, inner_dim, 1, bias=False)
+        self.to_lin_kv = DepthWiseConv2d(dim, inner_dim * 2, 3, padding=1, bias=False)
 
-        self.to_q = nn.Conv2d(dim, inner_dim, 1, bias = False)
-        self.to_kv = nn.Conv2d(dim, inner_dim * 2, 1, bias = False)
+        self.to_q = nn.Conv2d(dim, inner_dim, 1, bias=False)
+        self.to_kv = nn.Conv2d(dim, inner_dim * 2, 1, bias=False)
 
         self.to_out = nn.Conv2d(inner_dim * 2, dim, 1)
 
@@ -293,42 +295,42 @@ class LinearAttention(nn.Module):
 
         # linear attention
 
-        lin_q, lin_k, lin_v = (self.to_lin_q(fmap), *self.to_lin_kv(fmap).chunk(2, dim = 1))
-        lin_q, lin_k, lin_v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) (x y) c', h = h), (lin_q, lin_k, lin_v))
+        lin_q, lin_k, lin_v = (self.to_lin_q(fmap), *self.to_lin_kv(fmap).chunk(2, dim=1))
+        lin_q, lin_k, lin_v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) (x y) c', h=h), (lin_q, lin_k, lin_v))
 
-        lin_q = lin_q.softmax(dim = -1)
-        lin_k = lin_k.softmax(dim = -2)
+        lin_q = lin_q.softmax(dim=-1)
+        lin_k = lin_k.softmax(dim=-2)
 
         lin_q = lin_q * self.scale
 
         context = einsum('b n d, b n e -> b d e', lin_k, lin_v)
         lin_out = einsum('b n d, b d e -> b n e', lin_q, context)
-        lin_out = rearrange(lin_out, '(b h) (x y) d -> b (h d) x y', h = h, x = x, y = y)
+        lin_out = rearrange(lin_out, '(b h) (x y) d -> b (h d) x y', h=h, x=x, y=y)
 
         # conv-like full attention
 
-        q, k, v = (self.to_q(fmap), *self.to_kv(fmap).chunk(2, dim = 1))
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) c x y', h = h), (q, k, v))
+        q, k, v = (self.to_q(fmap), *self.to_kv(fmap).chunk(2, dim=1))
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b h) c x y', h=h), (q, k, v))
 
-        k = F.unfold(k, kernel_size = self.kernel_size, padding = self.kernel_size // 2)
-        v = F.unfold(v, kernel_size = self.kernel_size, padding = self.kernel_size // 2)
+        k = F.unfold(k, kernel_size=self.kernel_size, padding=self.kernel_size // 2)
+        v = F.unfold(v, kernel_size=self.kernel_size, padding=self.kernel_size // 2)
 
-        k, v = map(lambda t: rearrange(t, 'b (d j) n -> b n j d', d = self.dim_head), (k, v))
+        k, v = map(lambda t: rearrange(t, 'b (d j) n -> b n j d', d=self.dim_head), (k, v))
 
         q = rearrange(q, 'b c ... -> b (...) c') * self.scale
 
         sim = einsum('b i d, b i j d -> b i j', q, k)
-        sim = sim - sim.amax(dim = -1, keepdim = True).detach()
+        sim = sim - sim.amax(dim=-1, keepdim=True).detach()
 
-        attn = sim.softmax(dim = -1)
+        attn = sim.softmax(dim=-1)
 
         full_out = einsum('b i j, b i j d -> b i d', attn, v)
-        full_out = rearrange(full_out, '(b h) (x y) d -> b (h d) x y', h = h, x = x, y = y)
+        full_out = rearrange(full_out, '(b h) (x y) d -> b (h d) x y', h=h, x=x, y=y)
 
         # add outputs of linear attention + conv like full attention
 
         lin_out = self.nonlin(lin_out)
-        out = torch.cat((lin_out, full_out), dim = 1)
+        out = torch.cat((lin_out, full_out), dim=1)
         return self.to_out(out)
 
 ## dataset
@@ -388,7 +390,9 @@ class ImageDataset(Dataset):
         self.paths = sorted([p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')])
         assert len(self.paths) > 0, f'No images were found in {folder} for training'
 
-        self.labels = self.load_labels() if labels else None
+        # TODO : replace with self.smplx_labels (also in cli), to distinguish different types of conditionning: our work only supports smplx tho
+        # in final github readme, provide instructions + notebook on how to obtain smplx parameters from pixie, and how they are stored in the .npz file
+        self.labels = self.load_smplx_labels() if labels else None
 
         if transparent:
             num_channels = 4
@@ -414,7 +418,8 @@ class ImageDataset(Dataset):
             transforms.Lambda(expand_fn)
         ])
 
-    def load_labels(self):
+    def load_smplx_labels(self):
+        '''
         filename = 'dataset.json'
         with open(os.path.join(self.folder, filename)) as f:
             labels = json.load(f)['labels']
@@ -423,7 +428,29 @@ class ImageDataset(Dataset):
         labels = dict(labels)
         labels = [labels[fname.parts[-1]] for fname in self.paths]
         labels = torch.Tensor(labels).to(dtype=torch.float)
+
         return labels
+        '''
+
+        filename = 'dataset.npz'
+        labels = np.load(os.path.join(self.folder, filename))
+
+        global_orient = torch.Tensor(labels['global_orient'])
+        body_pose = torch.Tensor(labels['body_pose'])
+        jaw_pose = torch.Tensor(labels['jaw_pose'])
+        left_hand_pose = torch.Tensor(labels['left_hand_pose'])
+        right_hand_pose = torch.Tensor(labels['right_hand_pose'])
+        expression = torch.Tensor(labels['expression'])
+        betas = torch.Tensor(labels['betas'])
+        cam = torch.Tensor(labels['cam'])
+
+        return global_orient, body_pose, jaw_pose, left_hand_pose, right_hand_pose, expression, betas, cam
+
+    def get_labels_idx(self, idx):
+        return tuple([ tensor[idx] for tensor in self.labels ])
+
+    def labels_to_device(self, labels, device):
+        return tuple([ tensor.to(device).requires_grad_() for tensor in labels ])
 
     def __len__(self):
         return len(self.paths)
@@ -431,7 +458,8 @@ class ImageDataset(Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
-        return (self.transform(img), self.labels[index]) if self.labels is not None else self.transform(img)
+        return (self.transform(img), *self.get_labels_idx(index)) if self.labels is not None else self.transform(img)
+        # return (self.transform(img), self.labels[index]) if self.labels is not None else self.transform(img)
 
 
 ## augmentations
@@ -459,11 +487,11 @@ class AugWrapper(nn.Module):
 # modifiable global variables
 norm_class = nn.BatchNorm2d
 
-# def upsample(scale_factor = 2):
-#     return nn.Upsample(scale_factor = scale_factor)
+# def upsample(scale_factor=2):
+#     return nn.Upsample(scale_factor=scale_factor)
 
 class PixelShuffleUpsample(nn.Module):
-    def __init__(self, dim, dim_out = None):
+    def __init__(self, dim, dim_out=None):
         super().__init__()
         dim_out = default(dim_out, dim)
         conv = nn.Conv2d(dim, dim_out * 4, 1)
@@ -512,7 +540,7 @@ class GlobalContext(nn.Module):
         )
     def forward(self, x):
         context = self.to_k(x)
-        context = context.flatten(2).softmax(dim = -1)
+        context = context.flatten(2).softmax(dim=-1)
         out = einsum('b i n, b c n -> b c i', context, x.flatten(2))
         out = out.unsqueeze(-1)
         return self.net(out)
@@ -561,7 +589,7 @@ class FCANet(nn.Module):
         )
 
     def forward(self, x):
-        x = reduce(x * self.dct_weights, 'b c (h h1) (w w1) -> b c h1 w1', 'sum', h1 = 1, w1 = 1)
+        x = reduce(x * self.dct_weights, 'b c (h h1) (w w1) -> b c h1 w1', 'sum', h1=1, w1=1)
         return self.net(x)
 
 
@@ -577,11 +605,6 @@ class Generator(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        styling = False,
-        fourier = False,
-        render = False,
-        displacement = False,
-        labels = False,
         attn_res_layers = [],
         freq_chan_attn = False,
         rank = 0
@@ -590,7 +613,7 @@ class Generator(nn.Module):
         resolution = log2(image_size)
         assert is_power_of_two(image_size), 'image size must be a power of 2'
 
-        if transparent or displacement:
+        if transparent:
             init_channel = 4
         elif greyscale:
             init_channel = 1
@@ -677,82 +700,9 @@ class Generator(nn.Module):
             ])
             self.layers.append(layer)
 
-        # bijective SIREN mapping (input dimension = output dimension = hidden layers dimension)
-        if styling:
-            self.siren = Siren(in_features = latent_dim, out_features = latent_dim, hidden_features = latent_dim, hidden_layers = 2, outermost_linear = True)
-            self.linear = nn.Linear(latent_dim, 1024) # affine transformation of SIREN output
-        if labels:
-            self.cond_fc = nn.Sequential(
-                nn.Linear(2, latent_dim), # TODO : extend to more than 2 labels
-                nn.BatchNorm1d(latent_dim),
-                nn.GLU(dim = 1)
-            )
+        self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding=1)
 
-        self.out_conv = nn.Conv2d(features[-1], init_channel, 3, padding = 1)
-
-    # fourier feature mapping : https://github.com/tancik/fourier-feature-networks
-    # encoding function from equation (6) : https://dl.acm.org/doi/pdf/10.1145/3503250
-    def fourier_encoding(self, x, L=8):
-        # x.shape = (b, c)
-        basis = 2 ** torch.arange(L).float().unsqueeze(0).to(self.device) # shape = (1, L)
-        x_proj = x.unsqueeze(-1) @ basis # shape = (b, c, L)
-        mapping = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # shape = (b, c, 2L)
-        return mapping.reshape(x.shape[0], x.shape[1] * L, 2) # shape = (b, Lc, 2)
-
-    # latent mapping f : Z -> W
-    def latent_mapping(self, old_latent):
-        old_latent = F.normalize(old_latent, dim=1)
-        new_latent = self.siren(old_latent)[0].to(self.device) # latent space SIREN mapping
-        return old_latent, new_latent
-
-    # get style from latent via learned affine transformation
-    def get_styles(self, latent):
-        output = self.linear(latent).reshape(latent.shape[0], -1, 2).to(self.device)
-        # output = self.fourier_encoding(latent, L=2).to(self.device)
-
-        styles = {}
-        biases = {}
-        for k, size in enumerate(self.style_sizes):
-            # example : for size = 128, vector of shape (b, 128, 1, 1)
-            styles['s%d' % (k+2)] = rearrange(output[:,:size, 0], 'b c -> b c () ()')
-            biases['b%d' % (k+2)] = rearrange(output[:,:size, 1], 'b c -> b c () ()')
-
-        return styles, biases
-
-    def conditional_latent(self, latent, label):
-        label = self.cond_fc(label)
-        label = F.normalize(label, dim=1)
-        latent = torch.cat([latent, label], dim=1)
-        return latent
-
-    def forward(self, latent, label=None, nomapping=False, nomixing=False):
-        # styling a constant vector as in StyleGAN
-        if self.styling:
-            # constant vector, on which we will apply styling from latent
-            x = torch.ones_like(latent).to(self.device)
-
-            if not nomapping:
-                latent = self.latent_mapping(latent)[-1]
-
-            styles, biases = self.get_styles(latent)
-
-            # second latent for style mixing regularization
-            mixing = nomixing
-            if not nomixing:
-                latent2 = torch.randn_like(latent).to(self.device)
-                latent2 = self.latent_mapping(latent2)[-1]
-                styles2, biases2 = self.get_styles(latent2)
-
-        elif self.fourier:
-            x = self.fourier_encoding(latent, L=self.basis_dim).to(self.device)
-            x = x.reshape(x.shape[0], -1)
-
-        else:
-            x = latent
-
-        if label is not None:
-            x = self.conditional_latent(x, label)
-
+    def forward(self, x):
         x = rearrange(x, 'b c -> b c () ()')
         x = self.initial_conv(x)
         x = F.normalize(x, dim=1)
@@ -762,25 +712,6 @@ class Generator(nn.Module):
         for (res, (up, sle, attn)) in zip(self.res_layers, self.layers):
             if exists(attn):
                 x = attn(x) + x
-
-            if self.styling:
-                # add scaled normally distributed noise
-                x = x + torch.randn(x.shape).to(self.device) * 0.01
-
-                # x.shape = (b, c, w, h) -> mean/std shape = (b, w, h) -> rearranged shape = (b, 1, w, h)
-                mean = rearrange(x.mean(dim=1), 'b w h -> b () w h')
-                std = rearrange(x.std(dim=1), 'b w h -> b () w h')
-
-                # perform style mixing regularization with certain probability if not mixed on a previous layer already
-                if torch.rand(1).item() < 0.5 and not mixing:
-                    styles = styles2
-                    biases = biases2
-                    mixing = True
-
-                # AdaIN as in StyleGAN (adaptive instance normalization)
-                x = (x - mean) / std
-                x = styles['s%d' % res] * x + biases['b%d' % res]
-                # x = x * (styles['s%d' % res] + 1) + biases['b%d' % res]
 
             x = up(x)
 
@@ -814,9 +745,9 @@ class SimpleDecoder(nn.Module):
             chan_out = chans if not last_layer else final_chan * 2
             layer = nn.Sequential(
                 # upsample(),
-                # nn.Conv2d(chans, chan_out, 3, padding = 1),
+                # nn.Conv2d(chans, chan_out, 3, padding=1),
                 PixelShuffleUpsample(chans, chan_out),
-                nn.Conv2d(chan_out, chan_out, 3, padding = 1),
+                nn.Conv2d(chan_out, chan_out, 3, padding=1),
                 nn.GLU(dim = 1)
             )
             self.layers.append(layer)
@@ -836,8 +767,6 @@ class Discriminator(nn.Module):
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        render = False,
-        labels = False,
         disc_output_size = 5,
         attn_res_layers = []
     ):
@@ -854,7 +783,6 @@ class Discriminator(nn.Module):
             init_channel = 1
         else:
             init_channel = 3
-
         num_non_residual_layers = max(0, int(resolution) - 8)
         num_residual_layers = 8 - 3
 
@@ -876,7 +804,7 @@ class Discriminator(nn.Module):
 
             self.non_residual_layers.append(nn.Sequential(
                 Blur(),
-                nn.Conv2d(init_channel, chan_out, 4, stride = 2, padding = 1),
+                nn.Conv2d(init_channel, chan_out, 4, stride=2, padding=1),
                 nn.LeakyReLU(0.1)
             ))
 
@@ -893,9 +821,9 @@ class Discriminator(nn.Module):
                 SumBranches([
                     nn.Sequential(
                         Blur(),
-                        nn.Conv2d(chan_in, chan_out, 4, stride = 2, padding = 1),
+                        nn.Conv2d(chan_in, chan_out, 4, stride=2, padding=1),
                         nn.LeakyReLU(0.1),
-                        nn.Conv2d(chan_out, chan_out, 3, padding = 1),
+                        nn.Conv2d(chan_out, chan_out, 3, padding=1),
                         nn.LeakyReLU(0.1)
                     ),
                     nn.Sequential(
@@ -912,15 +840,13 @@ class Discriminator(nn.Module):
         if disc_output_size == 5:
             self.to_logits = nn.Sequential(
                 nn.Conv2d(last_chan, last_chan, 1),
-                nn.Dropout(0.2),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
         elif disc_output_size == 1:
             self.to_logits = nn.Sequential(
                 Blur(),
-                nn.Conv2d(last_chan, last_chan, 3, stride = 2, padding = 1),
-                nn.Dropout(0.2),
+                nn.Conv2d(last_chan, last_chan, 3, stride=2, padding=1),
                 nn.LeakyReLU(0.1),
                 nn.Conv2d(last_chan, 1, 4)
             )
@@ -931,9 +857,9 @@ class Discriminator(nn.Module):
             SumBranches([
                 nn.Sequential(
                     Blur(),
-                    nn.Conv2d(64, 32, 4, stride = 2, padding = 1),
+                    nn.Conv2d(64, 32, 4, stride=2, padding=1),
                     nn.LeakyReLU(0.1),
-                    nn.Conv2d(32, 32, 3, padding = 1),
+                    nn.Conv2d(32, 32, 3, padding=1),
                     nn.LeakyReLU(0.1)
                 ),
                 nn.Sequential(
@@ -951,25 +877,7 @@ class Discriminator(nn.Module):
         self.decoder1 = SimpleDecoder(chan_in=last_chan, chan_out=init_channel)
         self.decoder2 = SimpleDecoder(chan_in=features[-2][-1], chan_out=init_channel) if resolution >= 9 else None
 
-        if labels:
-            self.cond_fc = nn.Sequential(
-                nn.Linear(2, fmap_max), # TODO : extend to more than 2 labels
-                nn.LeakyReLU(0.1)
-            )
-
-            self.cond_fc32 = nn.Sequential(
-                nn.Linear(2, 32 * 32), # TODO : extend to more than 2 labels
-                nn.LeakyReLU(0.1)
-            )
-
-    def conditioned_output(self, output, label, out32=False):
-        b, c, w, h = output.shape
-        label = self.cond_fc32(label) if out32 else self.cond_fc(label)
-        label = label.reshape(b, 1, w, h) if out32 else label.reshape(b, c, 1, 1)
-        output = output * label * (1 / np.sqrt(label.shape[1]))
-        return output
-
-    def forward(self, x, label=None, calc_aux_loss=False):
+    def forward(self, x, calc_aux_loss=False):
         orig_img = x
         img_32x32 = F.interpolate(orig_img, size=(32, 32))
 
@@ -984,10 +892,6 @@ class Discriminator(nn.Module):
 
             x = net(x)
             layer_outputs.append(x)
-
-        if label is not None:
-            x = self.conditioned_output(x, label)
-            img_32x32 = self.conditioned_output(img_32x32, label, out32=True)
 
         out = self.to_logits(x).flatten(1)
         out_32x32 = self.to_shape_disc_out(img_32x32)
@@ -1008,7 +912,7 @@ class Discriminator(nn.Module):
         )
 
         if exists(self.decoder2):
-            select_random_quadrant = lambda rand_quadrant, img: rearrange(img, 'b c (m h) (n w) -> (m n) b c h w', m = 2, n = 2)[rand_quadrant]
+            select_random_quadrant = lambda rand_quadrant, img: rearrange(img, 'b c (m h) (n w) -> (m n) b c h w', m=2, n=2)[rand_quadrant]
             crop_image_fn = partial(select_random_quadrant, floor(random() * 4))
             img_part, layer_16x16_part = map(crop_image_fn, (orig_img, layer_16x16))
 
@@ -1023,23 +927,19 @@ class Discriminator(nn.Module):
 
         return out, out_32x32, aux_loss
 
-class LightweightGAN(nn.Module):
+class 3DiGAN(nn.Module):
     def __init__(
         self,
         *,
         latent_dim,
         image_size,
-        optimizer = "adam",
+        render_size,
+        optimizer = 'adam',
         fmap_max = 512,
         fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        styling = False,
-        fourier = False,
         render = False,
-        displacement = False,
-        labels = False,
-        supervision = 'discriminator',
         disc_output_size = 5,
         attn_res_layers = [],
         freq_chan_attn = False,
@@ -1049,8 +949,10 @@ class LightweightGAN(nn.Module):
         ddp = False
     ):
         super().__init__()
-        self.latent_dim = latent_dim
-        self.image_size = image_size
+        # self.latent_dim = latent_dim
+        # self.image_size = image_size
+        # self.render_size = render_size
+        resolution = render_size if render else image_size
 
         device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
@@ -1061,11 +963,6 @@ class LightweightGAN(nn.Module):
             fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
-            styling = styling,
-            fourier = fourier,
-            render = render,
-            displacement = displacement,
-            labels = labels,
             attn_res_layers = attn_res_layers,
             freq_chan_attn = freq_chan_attn,
             rank = rank
@@ -1074,52 +971,33 @@ class LightweightGAN(nn.Module):
         self.G = Generator(**G_kwargs)
 
         self.D = Discriminator(
-            image_size = image_size,
+            image_size = resolution,
             fmap_max = fmap_max,
             fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
-            labels = labels,
-            render = render,
             attn_res_layers = attn_res_layers,
             disc_output_size = disc_output_size
         )
-
-        if supervision == 'discriminator':
-            self.target_D = Discriminator(
-                image_size = image_size,
-                fmap_max = fmap_max,
-                fmap_inverse_coef = fmap_inverse_coef,
-                transparent = transparent,
-                greyscale = greyscale,
-                attn_res_layers = attn_res_layers,
-                disc_output_size = disc_output_size
-            )
 
         self.ema_updater = EMA(0.995)
         self.GE = Generator(**G_kwargs)
         set_requires_grad(self.GE, False)
 
-        if optimizer == "adam":
+        if optimizer == 'adam':
             self.G_opt = Adam(self.G.parameters(), lr = lr, betas=(0.5, 0.9))
             self.D_opt = Adam(self.D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
-            if supervision == 'discriminator':
-                self.target_D_opt = Adam(self.target_D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
-        elif optimizer == "adabelief":
+        elif optimizer == 'adabelie':
             self.G_opt = AdaBelief(self.G.parameters(), lr = lr, betas=(0.5, 0.9))
             self.D_opt = AdaBelief(self.D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
-            if supervision == 'discriminator':
-                self.target_D_opt = AdaBelief(self.target_D.parameters(), lr = lr * ttur_mult, betas=(0.5, 0.9))
         else:
-            assert False, "No valid optimizer is given"
+            assert False, 'No valid optimizer is given'
 
         self.apply(self._init_weights)
         self.reset_parameter_averaging()
 
         self.to(device)
-        self.D_aug = AugWrapper(self.D, image_size)
-        if supervision == 'discriminator':
-            self.target_D_aug = AugWrapper(self.target_D, image_size)
+        self.D_aug = AugWrapper(self.D, resolution)
 
     def _init_weights(self, m):
         if type(m) in {nn.Conv2d, nn.Linear}:
@@ -1155,20 +1033,20 @@ class Trainer():
         optimizer = 'adam',
         num_workers = None,
         latent_dim = 256,
-        image_size = 128,
+        image_size = 128, # TODO
+        render_size = 1024, # TODO
         num_image_tiles = 8,
         fmap_max = 512,
         transparent = False,
         greyscale = False,
-        styling = False,
-        nomapping = False,
-        fourier = False,
         render = False,
         displacement = False,
         labels = False,
+        gamma = 1e-2,
+        radius = 0.0006,
+        smplx_model_path = None,
+        smplx_uv_path = None,
         smoothing = 0,
-        noise = 0,
-        supervision = 'discriminator',
         batch_size = 4,
         gp_weight = 10,
         gradient_accumulate_every = 1,
@@ -1215,13 +1093,13 @@ class Trainer():
         self.config_path = self.models_dir / name / '.config.json'
 
         assert is_power_of_two(image_size), 'image size must be a power of 2 (64, 128, 256, 512, 1024)'
+        assert is_power_of_two(render_size), 'render size must be a power of 2 (64, 128, 256, 512, 1024)'
         assert all(map(is_power_of_two, attn_res_layers)), 'resolution layers of attention must all be powers of 2 (16, 32, 64, 128, 256, 512)'
 
         assert not (dual_contrast_loss and disc_output_size > 1), 'discriminator output size cannot be greater than 1 if using dual contrastive loss'
 
-        assert supervision == 'discriminator' or supervision == 'view', "supervision can only be either 'discriminator' or 'view'"
-
         self.image_size = image_size
+        self.render_size = render_size
         self.num_image_tiles = num_image_tiles
 
         self.latent_dim = latent_dim
@@ -1229,20 +1107,20 @@ class Trainer():
         self.fmap_max = fmap_max
         self.transparent = transparent
         self.greyscale = greyscale
-        self.styling = styling
-        self.nomapping = nomapping
-        self.fourier = fourier
         self.render = render
         self.displacement = displacement
-        self.supervision = supervision
         self.labels = labels
         self.smoothing = smoothing
-        self.noise = noise
+        self.smplx_model_path = smplx_model_path
+        self.smplx_uv_path = smplx_uv_path
+        self.gamma = gamma
+        self.radius = radius
+        self.num_points = 10**5
 
         self.swapping_prob = 0 # TODO : delete if regularization not needed
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
-        assert self.smoothing >= 0 and self.smoothing <= 1, 'label smoothing has to be between 0 and 1'
+        assert 0 <= self.smoothing <= 1, 'label smoothing has to be between 0 and 1'
 
         self.aug_prob = aug_prob
         self.aug_types = aug_types
@@ -1277,8 +1155,6 @@ class Trainer():
         self.init_folders()
 
         self.loader = None
-        self.target_loader = None
-        self.data_ratio = 1
         self.dataset_aug_prob = dataset_aug_prob
 
         self.calculate_fid_every = calculate_fid_every
@@ -1314,8 +1190,9 @@ class Trainer():
 
     @property
     def image_extension(self):
+        # TODO : handle displacements
         # return 'jpg' if not self.transparent else 'png'
-        return 'jpg' if not self.transparent and not self.displacement else 'png'
+        return 'jpg' if not self.transparent else 'png' # and not self.displacement else 'png'
 
     @property
     def checkpoint_num(self):
@@ -1340,24 +1217,22 @@ class Trainer():
             dist.init_process_group('nccl', rank=0, world_size=1)
 
         # instantiate GAN
-        self.GAN = LightweightGAN(
+        self.GAN = 3DiGAN(
             optimizer=self.optimizer,
             lr = self.lr,
             latent_dim = self.latent_dim,
             attn_res_layers = self.attn_res_layers,
             freq_chan_attn = self.freq_chan_attn,
             image_size = self.image_size,
+            render_size = self.render_size,
             ttur_mult = self.ttur_mult,
             fmap_max = self.fmap_max,
             disc_output_size = self.disc_output_size,
             transparent = self.transparent,
             greyscale = self.greyscale,
-            styling = self.styling,
-            fourier = self.fourier,
             render = self.render,
             displacement = self.displacement,
             labels = self.labels,
-            supervision = self.supervision,
             rank = self.rank,
             *args,
             **kwargs
@@ -1365,8 +1240,7 @@ class Trainer():
 
         if self.render:
             from rendering import Rendering # no need for pytorch3d if no rendering
-            self.rendering = Rendering(image_size = self.image_size, transparent = self.transparent, rank = self.rank)
-            self.supervision_loss = nn.MSELoss()
+            self.rendering = Rendering(image_size=self.render_size, transparent=self.transparent, rank=self.rank, smplx_model_path=self.smplx_model_path, smplx_uv_path=self.smplx_uv_path)
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank], 'output_device': self.rank, 'find_unused_parameters': True}
@@ -1374,12 +1248,6 @@ class Trainer():
             self.G_ddp = DDP(self.GAN.G, **ddp_kwargs)
             self.D_ddp = DDP(self.GAN.D, **ddp_kwargs)
             self.D_aug_ddp = DDP(self.GAN.D_aug, **ddp_kwargs)
-            if self.supervision == 'discriminator':
-                self.target_D_ddp = DDP(self.GAN.target_D, **ddp_kwargs)
-                self.target_D_aug_ddp = DDP(self.GAN.target_D_aug, **ddp_kwargs)
-
-        print('\nnumber of learnable model parameters : %d' % count_parameters(self.GAN, True))
-        print('number of frozen model parameters : %d\n' % count_parameters(self.GAN, False))
 
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config()))
@@ -1388,16 +1256,14 @@ class Trainer():
     def load_config(self):
         config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
         self.image_size = config['image_size']
+        self.render_size = config['render_size']
         self.transparent = config['transparent']
         self.syncbatchnorm = config['syncbatchnorm']
         self.disc_output_size = config['disc_output_size']
         self.greyscale = config.pop('greyscale', False)
-        self.styling = config.pop('styling', False)
-        self.fourier = config.pop('fourier', False)
         self.render = config.pop('render', False)
         self.displacement = config.pop('displacement', False)
         self.labels = config.pop('conditional', False)
-        self.supervision = config.pop('supervision', None)
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
         self.optimizer = config.pop('optimizer', 'adam')
@@ -1409,14 +1275,12 @@ class Trainer():
     def config(self):
         return {
             'image_size': self.image_size,
+            'render_size': self.render_size,
             'transparent': self.transparent,
             'greyscale': self.greyscale,
-            'styling': self.styling,
-            'fourier': self.fourier,
             'render': self.render,
             'displacement': self.displacement,
             'conditional' : self.labels,
-            'supervision': self.supervision, # TODO : needs to be None if no target folder
             'syncbatchnorm': self.syncbatchnorm,
             'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
@@ -1424,22 +1288,13 @@ class Trainer():
             'freq_chan_attn': self.freq_chan_attn
         }
 
-    def set_data_src(self, folder, target_folder=None):
+    def set_data_src(self, folder):
         num_workers = default(self.num_workers, math.ceil(NUM_CORES / self.world_size))
-        self.dataset = ImageDataset(folder, self.image_size, labels = self.labels, transparent = self.transparent, greyscale = self.greyscale, aug_prob = self.dataset_aug_prob)
+        resolution = self.render_size if self.render else self.image_size
+        self.dataset = ImageDataset(folder, resolution, labels=self.labels, transparent=self.transparent, greyscale=self.greyscale, aug_prob=self.dataset_aug_prob)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
-        dataloader = DataLoader(self.dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
+        dataloader = DataLoader(self.dataset, num_workers=num_workers, batch_size=math.ceil(self.batch_size / self.world_size), sampler=sampler, shuffle=not self.is_ddp, drop_last=True, pin_memory=True)
         self.loader = cycle(dataloader)
-
-        if target_folder:
-            assert self.render, 'the render flag must be called when using a target folder'
-            self.target_dataset = ImageDataset(target_folder, self.image_size, transparent = self.transparent, greyscale = self.greyscale, aug_prob = self.dataset_aug_prob)
-            target_sampler = DistributedSampler(self.target_dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
-            target_dataloader = DataLoader(self.target_dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = target_sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
-            self.target_loader = cycle(target_dataloader)
-
-            self.data_ratio = len(self.dataset) // len(self.target_dataset)
-            print('semi-superivision rendering loss every %d epochs' % self.data_ratio)
 
         # auto set augmentation prob for user if dataset is detected to be low
         num_samples = len(self.dataset)
@@ -1448,18 +1303,23 @@ class Trainer():
             print(f'autosetting augmentation probability to {round(self.aug_prob * 100)}%')
 
     def sample_label(self, size, swapping=False):
-        idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
-        labels = torch.Tensor(self.dataset.labels[idx]).to(self.device)
+        idx = np.random.choice(self.dataset.labels[0].shape[0], size, replace=True)
+        labels = self.dataset.get_labels_idx(idx)
+        labels = self.dataset.labels_to_device(labels, self.device)
+        # labels = torch.Tensor(self.dataset.labels[idx]).to(self.device)
 
         if swapping:
             # swap labels for which label[i] satisfies random[i] > self.swapping_prob
-            swapped_idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
+            swapped_idx = np.random.choice(self.dataset.labels[0].shape[0], size, replace=True)
             swapped_idx = np.where(np.random.rand(size) > self.swapping_prob, idx, swapped_idx)
-            swapped_labels = torch.Tensor(self.dataset.labels[swapped_idx]).to(self.device)
+            swapped_labels = self.dataset.get_labels_idx(swapped_idx)
+            swapped_labels = self.dataset.labels_to_device(swapped_labels, self.device)
+            # swapped_labels = torch.Tensor(self.dataset.labels[swapped_idx]).to(self.device)
             return labels, swapped_labels
 
         return labels
 
+    # TODO : optimize for GPU memory
     def train(self):
         assert exists(self.loader), 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
 
@@ -1472,8 +1332,9 @@ class Trainer():
 
         batch_size = math.ceil(self.batch_size / self.world_size)
 
-        image_size = self.GAN.image_size
-        latent_dim = self.GAN.latent_dim
+        # TODO : is there a reason for self.GAN.object?
+        # image_size = self.GAN.image_size
+        latent_dim = self.latent_dim # self.GAN.latent_dim
 
         aug_prob   = default(self.aug_prob, 0)
         aug_types  = self.aug_types
@@ -1482,9 +1343,6 @@ class Trainer():
         G = self.GAN.G if not self.is_ddp else self.G_ddp
         D = self.GAN.D if not self.is_ddp else self.D_ddp
         D_aug = self.GAN.D_aug if not self.is_ddp else self.D_aug_ddp
-        if self.supervision == 'discriminator':
-            target_D = self.GAN.target_D if not self.is_ddp else self.target_D_ddp
-            target_D_aug = self.GAN.target_D_aug if not self.is_ddp else self.target_D_aug_ddp
 
         apply_gradient_penalty = self.steps % 4 == 0
 
@@ -1497,26 +1355,19 @@ class Trainer():
         else:
             D_loss_fn = hinge_loss
 
-        # semi-supervision conditions
-        # TODO : check conditions
-        view_supervision_cond = (self.target_loader and self.supervision == 'view') # and self.steps % self.data_ratio == 0)
-        disc_supervision_cond = (self.target_loader and self.supervision == 'discriminator') #  and self.steps % self.data_ratio == 0)
-        ddps_list = [D_aug, G]
-        if disc_supervision_cond:
-            ddps_list = [D_aug, target_D_aug, G]
-
         # train discriminator
         self.GAN.D_opt.zero_grad()
-        if disc_supervision_cond:
-            self.GAN.target_D_opt.zero_grad()
 
-        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=ddps_list):
+        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D_aug, G]):
             latents = torch.randn(batch_size, latent_dim).to(self.device)
 
             if self.labels:
-                image_batch, label_batch = next(self.loader)
-                image_batch = image_batch.to(self.device)
-                label_batch = label_batch.to(self.device)
+                next_sample = next(self.loader)
+                # TODO : when loading data, write specialized function which take data + labels and split according to labels (smplx params in our case)
+                image_batch, label_batch = next_sample[0], next_sample[1:]
+                image_batch, label_batch = image_batch.to(self.device), self.dataset.labels_to_device(label_batch, self.device)
+                label_batch = self.rendering.renderlabels(label_batch)
+                # label_batch = label_batch #.to(self.device)
             else:
                 image_batch = next(self.loader).to(self.device)
                 label_batch = None
@@ -1525,16 +1376,15 @@ class Trainer():
             with amp_context():
                 with torch.no_grad():
                     sampled_labels, swapped_sampled_labels = self.sample_label(batch_size, True) if self.labels else (None, None)
+                    swapped_sampled_labels = self.rendering.renderlabels(swapped_sampled_labels) if self.labels else None
                     generated_images = G(latents, label=swapped_sampled_labels)
+                    # generated_images = G(latents, label=label_batch)
                     if self.render:
-                        target_fake_images = generated_images.clone()
-                        generated_images = self.rendering.render(generated_images, label=sampled_labels)
-                # instance noise
-                # TODO : 2000 end noise hyperparameter
-                generated_images = generated_images + linear_decay(self.noise, self.steps, 2000) * torch.randn(generated_images.shape).to(self.device)
-                image_batch = image_batch + linear_decay(self.noise, self.steps, 2000) * torch.randn(image_batch.shape).to(self.device)
+                        generated_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
+                        sampled_labels = self.rendering.renderlabels(sampled_labels) if self.labels else None
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
+                # fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=label_batch, detach=True, **aug_kwargs)
                 real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, labels=label_batch, calc_aux_loss=True, **aug_kwargs)
 
                 real_output_loss = real_output
@@ -1548,34 +1398,15 @@ class Trainer():
                     divergence_32x32 = D_loss_fn(real_output_32x32, fake_output_32x32, smoothing=self.render*self.smoothing)
                 disc_loss = divergence + divergence_32x32
 
-                # discriminator superivision loss
-                if disc_supervision_cond:
-                    target_image_batch = next(self.target_loader).to(self.device)
-                    image_batch.requires_grad_()
-
-                    target_fake_output, target_fake_output_32x32, _ = target_D_aug(target_fake_images, detach=True, **aug_kwargs)
-
-                    target_real_output, target_real_output_32x32, target_real_aux_loss = target_D_aug(image_batch, calc_aux_loss=True, **aug_kwargs)
-
-                    target_real_output_loss = target_real_output
-                    target_fake_output_loss = target_fake_output
-
-                    target_divergence = D_loss_fn(target_real_output_loss, target_fake_output_loss)
-                    target_divergence_32x32 = D_loss_fn(target_real_output_32x32, target_fake_output_32x32)
-                    disc_target_loss = target_divergence + target_divergence_32x32
-
                 aux_loss = real_aux_loss
                 disc_loss = disc_loss + aux_loss
-                if disc_supervision_cond:
-                    disc_loss = disc_loss + disc_target_loss + target_real_aux_loss
 
-            # TODO : apply gradient penalty to target data as well
             if apply_gradient_penalty:
                 outputs = [real_output, real_output_32x32]
                 outputs = list(map(self.D_scaler.scale, outputs)) if self.amp else outputs
 
                 scaled_gradients = torch_grad(outputs=outputs, inputs=image_batch,
-                                       grad_outputs=list(map(lambda t: torch.ones(t.size(), device = image_batch.device), outputs)),
+                                       grad_outputs=list(map(lambda t: torch.ones(t.size(), device=image_batch.device), outputs)),
                                        create_graph=True, retain_graph=True, only_inputs=True)[0]
 
                 inv_scale = safe_div(1., self.D_scaler.get_scale()) if self.amp else 1.
@@ -1601,8 +1432,6 @@ class Trainer():
         self.last_recon_loss = aux_loss.item()
         self.d_loss = float(total_disc_loss.item() / self.gradient_accumulate_every)
         self.D_scaler.step(self.GAN.D_opt)
-        if disc_supervision_cond:
-            self.D_scaler.step(self.GAN.target_D_opt)
         self.D_scaler.update()
 
         # generator loss fn
@@ -1616,14 +1445,16 @@ class Trainer():
         # train generator
         self.GAN.G_opt.zero_grad()
 
-        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=ddps_list):
+        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D_aug]):
             latents = torch.randn(batch_size, latent_dim).to(self.device)
 
             if G_requires_calc_real:
                 if self.labels:
-                    image_batch, label_batch = next(self.loader)
-                    image_batch = image_batch.to(self.device)
-                    label_batch = label_batch.to(self.device)
+                    next_sample = next(self.loader)
+                    image_batch, label_batch = next_sample[0], next_sample[1:]
+                    image_batch, label_batch = image_batch.to(self.device), self.dataset.labels_to_device(label_batch, self.device)
+                    label_batch = self.rendering.renderlabels(label_batch)
+                    # label_batch = label_batch.to(self.device)
                 else:
                     image_batch = next(self.loader).to(self.device)
                     label_batch = None
@@ -1631,31 +1462,21 @@ class Trainer():
 
             with amp_context():
                 sampled_labels, swapped_sampled_labels = self.sample_label(batch_size, True) if self.labels else (None, None)
+                swapped_sampled_labels = self.rendering.renderlabels(swapped_sampled_labels) if self.labels else None
                 generated_images = G(latents, label=swapped_sampled_labels)
+                # generated_images = G(latents, label=label_batch)
                 if self.render:
-                    target_fake_images = generated_images.clone()
-                    displacements_norm = torch.linalg.norm(generated_images[:,-1,:,:].clone())
-                    generated_images = self.rendering.render(generated_images, label=sampled_labels)
+                    generated_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
+                    sampled_labels = self.rendering.renderlabels(sampled_labels) if self.labels else None
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, **aug_kwargs)
+                # fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=label_batch, **aug_kwargs)
                 real_output, real_output_32x32, _ = D_aug(image_batch, labels=label_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
 
                 loss = G_loss_fn(real_output, fake_output)
                 loss_32x32 = G_loss_fn(real_output_32x32, fake_output_32x32)
 
                 gen_loss = loss + loss_32x32
-                if self.displacement:
-                    gen_loss = gen_loss + linear_decay(1.0, self.steps, 2000) * displacements_norm
-
-                # TODO : get rid of view superivision
-                # view superivision loss
-                if view_supervision_cond:
-                    target_image_batch = next(self.target_loader).to(self.device)
-                    image_batch.requires_grad_()
-
-                    target_generated_images = self.rendering.render(target_fake_images)
-                    gen_loss = gen_loss + self.supervision_loss(target_generated_images, target_image_batch)
-
                 gen_loss = gen_loss / self.gradient_accumulate_every
 
             gen_loss.register_hook(raise_if_nan)
@@ -1689,7 +1510,7 @@ class Trainer():
                 self.save(self.checkpoint_num)
 
             if self.steps % self.evaluate_every == 0 or (self.steps % 100 == 0 and self.steps < 20000):
-                self.evaluate(floor(self.steps / self.evaluate_every), num_image_tiles = self.num_image_tiles)
+                self.evaluate(floor(self.steps / self.evaluate_every), num_image_tiles=self.num_image_tiles)
 
             if exists(self.calculate_fid_every) and self.steps % self.calculate_fid_every == 0 and self.steps != 0:
                 num_batches = math.ceil(self.calculate_fid_num_images / self.batch_size)
@@ -1708,8 +1529,8 @@ class Trainer():
         ext = self.image_extension
         num_rows = num_image_tiles
 
-        latent_dim = self.GAN.latent_dim
-        image_size = self.GAN.image_size
+        latent_dim = self.latent_dim # self.GAN.latent_dim
+        # image_size = self.GAN.image_size
 
         # latents and noise
         def image_to_pil(image):
@@ -1752,7 +1573,8 @@ class Trainer():
                            context={'ema': False})
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
         if self.render:
-            rendered_images = self.rendering.render(generated_images)
+            sampled_labels = self.sample_label(generated_images.shape[0]) if self.labels else None
+            rendered_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
             if self.run is not None:
                 aim_images = []
                 for idx, image in enumerate(rendered_images):
@@ -1777,7 +1599,8 @@ class Trainer():
                            context={'ema': True})
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
         if self.render:
-            rendered_images = self.rendering.render(generated_images)
+            sampled_labels = self.sample_label(generated_images.shape[0]) if self.labels else None
+            rendered_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
             if self.run is not None:
                 aim_images = []
                 for idx, image in enumerate(rendered_images):
@@ -1867,12 +1690,10 @@ class Trainer():
             os.makedirs(real_path)
 
             for batch_num in tqdm(range(num_batches), desc='calculating FID - saving reals'):
-                # TODO : check whether to device can be used (perhaps memory on cpu is required?)
                 if self.labels:
-                    real_batch, _ = next(self.loader)
-                    real_batch = real_batch # .to(self.device)
+                    real_batch = next(self.loader)[0].to(self.device)
                 else:
-                    real_batch = next(self.loader) # .to(self.device)
+                    real_batch = next(self.loader).to(self.device)
                 for k, image in enumerate(real_batch.unbind(0)):
                     ind = k + batch_num * self.batch_size
                     torchvision.utils.save_image(image, real_path / f'{ind}.png')
@@ -1885,8 +1706,8 @@ class Trainer():
         self.GAN.eval()
         ext = self.image_extension
 
-        latent_dim = self.GAN.latent_dim
-        image_size = self.GAN.image_size
+        latent_dim = self.latent_dim # self.GAN.latent_dim
+        # image_size = self.GAN.image_size
 
         for batch_num in tqdm(range(num_batches), desc='calculating FID - saving generated'):
             # latents and noise
@@ -1904,43 +1725,30 @@ class Trainer():
     @torch.no_grad()
     def generate_(self, G, style, num_image_tiles=8):
         label = self.sample_label(style.shape[0]) if self.labels else None
-        arguments = (style, label) if self.labels else (style,)
-        generated_images = evaluate_in_chunks(self.batch_size, G, self.nomapping, True, *arguments) # no style mixing regularization (nomixing=True) during evaluation
+        arguments = (style, *label) if self.labels else (style,)
+        generated_images = evaluate_in_chunks(self.batch_size, G, True, *arguments)
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
-    def generate_interpolation(self, num=0, num_image_tiles=8, num_steps=100, slerp_interp=True, along_axis=False, save_frames=False):
+    def generate_interpolation(self, num=0, num_image_tiles=8, num_steps=100, save_frames=False):
         self.GAN.eval()
         ext = self.image_extension
         num_rows = num_image_tiles
 
-        latent_dim = self.GAN.latent_dim
-        image_size = self.GAN.image_size
+        latent_dim = self.latent_dim # self.GAN.latent_dim
+        # image_size = self.GAN.image_size
 
         # latents and noise
         latents_low = torch.randn(num_rows ** 2, latent_dim).to(self.device)
         latents_high = torch.randn(num_rows ** 2, latent_dim).to(self.device)
 
-        if along_axis:
-            assert num_rows ** 2 < latent_dim, "can't have more tiles than features in the latent space (for num_image_tiles=%d, we would display %d*%d=%d tiles, for a latent dimension of %d), decrease num_image_tile"  % (num_rows, num_rows, num_rows, num_rows**2, latent_dim)
-
-            latents_high = latents_low.clone()
-            for tile in range(num_rows ** 2):
-                latents_low[tile, tile * int(latent_dim / (num_rows ** 2))] = -5.0
-                latents_high[tile, tile * int(latent_dim / (num_rows ** 2))] = 5.0
-
         ratios = torch.linspace(0., 8., num_steps)
 
         frames = []
         for ratio in tqdm(ratios):
-            # default interpolation method is SLERP, othwerwise use LERP
-            if slerp_interp:
-                interp_latents = slerp(ratio, latents_low, latents_high)
-            else:
-                interp_latents = torch.lerp(latents_low, latents_high, ratio)
-
+            interp_latents = slerp(ratio, latents_low, latents_high)
             generated_images = self.generate_(self.GAN.GE, interp_latents)
-            images_grid = torchvision.utils.make_grid(generated_images, nrow = num_rows)
+            images_grid = torchvision.utils.make_grid(generated_images, nrow=num_rows)
             pil_image = transforms.ToPILImage()(images_grid.cpu())
 
             if self.transparent:
@@ -2022,7 +1830,7 @@ class Trainer():
             print(f"loading from version {load_data['version']}")
 
         try:
-            self.GAN.load_state_dict(load_data['GAN'], strict = self.load_strict)
+            self.GAN.load_state_dict(load_data['GAN'], strict=self.load_strict)
         except Exception as e:
             saved_version = load_data['version']
             print('unable to load save model. please try downgrading the package to the version specified by the saved model (to do so, just run `pip install lightweight-gan=={saved_version}`')

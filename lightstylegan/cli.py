@@ -6,12 +6,13 @@ from retry.api import retry_call
 from tqdm import tqdm
 from datetime import datetime
 from functools import wraps
-from lightweight_gan import Trainer, NanException
+from model import Trainer, NanException
 from diff_augment_test import DiffAugmentTest
 
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
+from torchvision.transforms import ToPILImage
 
 import numpy as np
 
@@ -25,9 +26,9 @@ def default(val, d):
 def cast_list(el):
     return el if isinstance(el, list) else [el]
 
-def timestamped_filename(prefix = 'generated-'):
+def timestamped_filename(prefix='generated-'):
     now = datetime.now()
-    timestamp = now.strftime("%m-%d-%Y_%H-%M-%S")
+    timestamp = now.strftime('%m-%d-%Y_%H-%M-%S')
     return f'{prefix}{timestamp}'
 
 def set_seed(seed):
@@ -37,7 +38,7 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-def run_training(rank, world_size, model_args, data, target_data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash):
+def run_training(rank, world_size, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash):
     is_main = rank == 0
     is_ddp = world_size > 1
 
@@ -47,7 +48,7 @@ def run_training(rank, world_size, model_args, data, target_data, load_from, new
         os.environ['MASTER_PORT'] = '12355'
         dist.init_process_group('nccl', rank=rank, world_size=world_size)
 
-        print(f"{rank + 1}/{world_size} process initialized.")
+        print(f'{rank + 1}/{world_size} process initialized.')
 
     model_args.update(
         is_ddp = is_ddp,
@@ -62,9 +63,9 @@ def run_training(rank, world_size, model_args, data, target_data, load_from, new
     else:
         model.clear()
 
-    model.set_data_src(data, target_data)
+    model.set_data_src(data)
 
-    progress_bar = tqdm(initial = model.steps, total = num_train_steps, mininterval=10., desc=f'{name}<{data}>')
+    progress_bar = tqdm(initial = model.steps, total=num_train_steps, mininterval=10., desc=f'{name}<{data}>')
     while model.steps < num_train_steps:
         retry_call(model.train, tries=3, exceptions=NanException)
         progress_bar.n = model.steps
@@ -79,32 +80,31 @@ def run_training(rank, world_size, model_args, data, target_data, load_from, new
 
 def train_from_folder(
     data = './data',
-    target_data = None,
     results_dir = './results',
     models_dir = './models',
     name = 'default',
     new = False,
     load_from = -1,
     image_size = 256,
+    render_size = 256, # 1024
     optimizer = 'adam',
     fmap_max = 512,
     transparent = False,
     greyscale = False,
-    styling = False,
-    nomapping = False,
-    fourier = False,
     latent_dim = 256,
     render = False,
     displacement = False,
     labels = False,
+    gamma = 1e-3,
+    radius = 8e-4,
+    smplx_model_path = None,
+    smplx_uv_path = None,
     smoothing = 0,
-    noise = 0,
-    supervision = 'discriminator', # 'discriminator' or 'view'
     batch_size = 8,
     gp_weight = 10,
     gradient_accumulate_every = 4,
     num_train_steps = 150000,
-    ttur_mult = 1.,
+    ttur_mult = 1,
     learning_rate = 2e-4,
     save_every = 1000,
     evaluate_every = 1000,
@@ -114,15 +114,13 @@ def train_from_folder(
     aug_test = False,
     aug_prob = None,
     aug_types = ['cutout', 'translation'],
-    dataset_aug_prob = 0.,
+    dataset_aug_prob = 0.0,
     attn_res_layers = [32],
     freq_chan_attn = False,
     disc_output_size = 1,
     dual_contrast_loss = False,
     antialias = False,
     interpolation_num_steps = 100,
-    lerp = False,
-    interp_along_axis = False,
     save_frames = False,
     num_image_tiles = None,
     num_workers = None,
@@ -138,7 +136,8 @@ def train_from_folder(
     aim_run_hash = None,
     load_strict = True
 ):
-    num_image_tiles = default(num_image_tiles, 4 if image_size > 512 else 8)
+    resolution = render_size if render else image_size
+    num_image_tiles = default(num_image_tiles, 4 if resolution > 512 else 8)
 
     model_args = dict(
         name = name,
@@ -153,22 +152,22 @@ def train_from_folder(
         dual_contrast_loss = dual_contrast_loss,
         antialias = antialias,
         image_size = image_size,
+        render_size = render_size,
         num_image_tiles = num_image_tiles,
         optimizer = optimizer,
         num_workers = num_workers,
         fmap_max = fmap_max,
         transparent = transparent,
         greyscale = greyscale,
-        styling = styling,
-        nomapping = nomapping,
-        fourier = fourier,
         latent_dim = latent_dim,
         render = render,
         displacement = displacement,
         labels = labels,
+        gamma = gamma,
+        radius = radius,
+        smplx_model_path = smplx_model_path,
+        smplx_uv_path = smplx_uv_path,
         smoothing = smoothing,
-        noise = noise,
-        supervision = supervision,
         ttur_mult = ttur_mult,
         lr = learning_rate,
         save_every = save_every,
@@ -184,7 +183,7 @@ def train_from_folder(
     )
 
     if generate:
-        model = Trainer(**model_args)
+        model = Trainer(**model_args, use_aim=use_aim)
         model.load(load_from)
         samples_name = timestamped_filename()
         checkpoint = model.checkpoint_num
@@ -193,41 +192,34 @@ def train_from_folder(
         return
 
     if generate_interpolation:
-        model = Trainer(**model_args)
+        model = Trainer(**model_args, use_aim=use_aim)
         model.load(load_from)
         samples_name = timestamped_filename()
-
-        string_slerp = 'spherical '
-        string_along_axis = ', interpolated along latent axes'
-        print( 'use %slinear interpolation%s' % ((not lerp) * string_slerp, interp_along_axis * string_along_axis) )
-
-        model.generate_interpolation(samples_name, num_image_tiles, num_steps=interpolation_num_steps, slerp_interp=(not lerp), along_axis=interp_along_axis, save_frames=save_frames)
+        model.generate_interpolation(samples_name, num_image_tiles, num_steps=interpolation_num_steps, save_frames=save_frames)
         print(f'interpolation generated at {results_dir}/{name}/{samples_name}')
         return
 
     if show_progress:
-        model = Trainer(**model_args)
+        model = Trainer(**model_args, use_aim=use_aim)
         model.show_progress(num_images=num_image_tiles, types=generate_types)
         return
 
     if aug_test:
-        DiffAugmentTest(data=data, image_size=image_size, batch_size=batch_size, types=aug_types, nrow=num_image_tiles)
+        DiffAugmentTest(data=data, image_size=resolution, batch_size=batch_size, types=aug_types, nrow=num_image_tiles)
         return
 
     world_size = torch.cuda.device_count()
 
     if world_size == 1 or not multi_gpus:
-        run_training(0, 1, model_args, data, target_data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash)
+        run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash)
         return
 
     mp.spawn(run_training,
-        args=(world_size, model_args, data, target_data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash),
-        nprocs=world_size,
-        join=True)
+        args = (world_size, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash),
+        nprocs = world_size,
+        join = True
+    )
+
 
 def main():
     fire.Fire(train_from_folder)
-
-
-if __name__ == '__main__':
-    sys.exit(main())
