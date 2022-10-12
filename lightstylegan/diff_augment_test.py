@@ -8,7 +8,7 @@ import torchvision
 from torch import nn
 from torch.utils.data import DataLoader
 
-from lightweight_gan import AugWrapper, ImageDataset
+from model import AugWrapper, ImageDataset
 
 
 class DummyModel(nn.Module):

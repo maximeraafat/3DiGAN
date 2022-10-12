@@ -37,14 +37,12 @@ class Rendering():
         rank = 0
     ):
 
+        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+
         self.image_size = image_size
         self.faces_per_pixel = faces_per_pixel
         self.points_per_pixel = points_per_pixel
         self.point_radius = point_radius
-
-        self.background_color = (0., 0., 0.) if transparent else (1., 1., 1.)
-
-        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         # mesh and smplx uv .obj paths
         self.mesh_obj_path = 'mesh.obj'

@@ -1,1 +1,1 @@
-from .lightweight_gan import LightweightGAN, Generator, Discriminator, Trainer, NanException
+from .model import 3DiGAN, Generator, Discriminator, Trainer, NanException

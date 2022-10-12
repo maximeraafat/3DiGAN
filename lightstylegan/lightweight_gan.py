@@ -620,17 +620,8 @@ class Generator(nn.Module):
         else:
             init_channel = 3
 
+        # TODO : if possible, set device from image or availabe tensors (everywhere)
         self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
-
-        self.styling = styling
-        self.fourier = fourier
-
-        if fourier:
-            self.basis_dim = 256 // (latent_dim * 2) # basis dim in fourier decomposition such that we have a ~256D latent after decomposition
-            latent_dim = self.basis_dim * latent_dim * 2 # if we perform fourier decomposition, we change the latent dimension
-
-        if labels:
-            latent_dim *= 2
 
         fmap_max = default(fmap_max, latent_dim)
 
