@@ -30,6 +30,7 @@ from version import __version__
 
 from tqdm import tqdm
 from einops import rearrange, reduce, repeat
+from einops.layers.torch import Rearrange
 
 from adabelief_pytorch import AdaBelief
 
@@ -38,13 +39,9 @@ from adabelief_pytorch import AdaBelief
 # and comments I created but are useless
 # write requirements.txt file
 
-# TODO
-# use cpu as a fallback for mps unsupported operations
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
-# warnings
-if not torch.cuda.is_available():
-    print('WARNING: we highly recommend running this code on an Nvidia GPU with CUDA!\n')
+# assert
+assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
 
 # constants
 NUM_CORES = multiprocessing.cpu_count()
@@ -142,7 +139,7 @@ def dual_contrastive_loss(real_logits, fake_logits):
         t1 = rearrange(t1, 'i -> i ()')
         t2 = repeat(t2, 'j -> i j', i = t1.shape[0])
         t = torch.cat((t1, t2), dim = -1)
-        return F.cross_entropy(t, torch.zeros(t1.shape[0], device = device, dtype = torch.long))
+        return F.cross_entropy(t, torch.zeros(t1.shape[0], device=device, dtype=torch.long))
 
     return loss_half(real_logits, fake_logits) + loss_half(-fake_logits, -real_logits)
 
@@ -516,6 +513,16 @@ class PixelShuffleUpsample(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+def SPConvDownsample(dim, dim_out=None):
+    # https://arxiv.org/abs/2208.03641 shows this is the most optimal way to downsample
+    # named SP-conv in the paper, but basically a pixel unshuffle
+    dim_out = default(dim_out, dim)
+    return nn.Sequential(
+        Rearrange('b c (h s1) (w s2) -> b (c s1 s2) h w', s1=2, s2=2),
+        nn.Conv2d(dim * 4, dim_out, 1)
+    )
+
+
 ## squeeze excitation classes
 
 # global context network
@@ -621,7 +628,7 @@ class Generator(nn.Module):
             init_channel = 3
 
         # TODO : if possible, set device from image or availabe tensors (everywhere)
-        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+        # self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         fmap_max = default(fmap_max, latent_dim)
 
@@ -677,11 +684,9 @@ class Generator(nn.Module):
 
             layer = nn.ModuleList([
                 nn.Sequential(
-                    # upsample(),
-                    PixelShuffleUpsample(chan_in, chan_out),
+                    PixelShuffleUpsample(chan_in),
                     Blur(),
-                    # Conv2dSame(chan_in, chan_out * 2, 4),
-                    Conv2dSame(chan_out, chan_out * 2, 4),
+                    Conv2dSame(chan_in, chan_out * 2, 4),
                     Noise(),
                     norm_class(chan_out * 2),
                     nn.GLU(dim = 1)
@@ -735,10 +740,8 @@ class SimpleDecoder(nn.Module):
             last_layer = ind == (num_upsamples - 1)
             chan_out = chans if not last_layer else final_chan * 2
             layer = nn.Sequential(
-                # upsample(),
-                # nn.Conv2d(chans, chan_out, 3, padding=1),
-                PixelShuffleUpsample(chans, chan_out),
-                nn.Conv2d(chan_out, chan_out, 3, padding=1),
+                PixelShuffleUpsample(chans),
+                nn.Conv2d(chans, chan_out, 3, padding=1),
                 nn.GLU(dim = 1)
             )
             self.layers.append(layer)
@@ -812,7 +815,7 @@ class Discriminator(nn.Module):
                 SumBranches([
                     nn.Sequential(
                         Blur(),
-                        nn.Conv2d(chan_in, chan_out, 4, stride=2, padding=1),
+                        SPConvDownsample(chan_in, chan_out),
                         nn.LeakyReLU(0.1),
                         nn.Conv2d(chan_out, chan_out, 3, padding=1),
                         nn.LeakyReLU(0.1)
@@ -848,7 +851,7 @@ class Discriminator(nn.Module):
             SumBranches([
                 nn.Sequential(
                     Blur(),
-                    nn.Conv2d(64, 32, 4, stride=2, padding=1),
+                    SPConvDownsample(64, 32),
                     nn.LeakyReLU(0.1),
                     nn.Conv2d(32, 32, 3, padding=1),
                     nn.LeakyReLU(0.1)
@@ -940,12 +943,8 @@ class 3DiGAN(nn.Module):
         ddp = False
     ):
         super().__init__()
-        # self.latent_dim = latent_dim
-        # self.image_size = image_size
-        # self.render_size = render_size
-        resolution = render_size if render else image_size
-
         device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+        resolution = render_size if render else image_size
 
         G_kwargs = dict(
             image_size = image_size,
@@ -1036,7 +1035,6 @@ class Trainer():
         gamma = 1e-2,
         radius = 0.0006,
         smplx_model_path = None,
-        smplx_uv_path = None,
         smoothing = 0,
         batch_size = 4,
         gp_weight = 10,
@@ -1103,7 +1101,6 @@ class Trainer():
         self.labels = labels
         self.smoothing = smoothing
         self.smplx_model_path = smplx_model_path
-        self.smplx_uv_path = smplx_uv_path
         self.gamma = gamma
         self.radius = radius
         self.num_points = 10**5
@@ -1231,7 +1228,7 @@ class Trainer():
 
         if self.render:
             from rendering import Rendering # no need for pytorch3d if no rendering
-            self.rendering = Rendering(image_size=self.render_size, transparent=self.transparent, rank=self.rank, smplx_model_path=self.smplx_model_path, smplx_uv_path=self.smplx_uv_path)
+            self.rendering = Rendering(image_size=self.render_size, point_radius=self.radius, gamma=self.gamma, num_points=self.num_points, smplx_model_path=self.smplx_model_path, rank=self.rank)
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank], 'output_device': self.rank, 'find_unused_parameters': True}
@@ -1332,7 +1329,7 @@ class Trainer():
         aug_kwargs = {'prob': aug_prob, 'types': aug_types}
 
         G = self.GAN.G if not self.is_ddp else self.G_ddp
-        D = self.GAN.D if not self.is_ddp else self.D_ddp
+        # D = self.GAN.D if not self.is_ddp else self.D_ddp
         D_aug = self.GAN.D_aug if not self.is_ddp else self.D_aug_ddp
 
         apply_gradient_penalty = self.steps % 4 == 0
@@ -1350,7 +1347,7 @@ class Trainer():
         self.GAN.D_opt.zero_grad()
 
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D_aug, G]):
-            latents = torch.randn(batch_size, latent_dim).to(self.device)
+            latents = torch.randn(batch_size, latent_dim, device=self.device)
 
             if self.labels:
                 next_sample = next(self.loader)
@@ -1371,7 +1368,7 @@ class Trainer():
                     generated_images = G(latents, label=swapped_sampled_labels)
                     # generated_images = G(latents, label=label_batch)
                     if self.render:
-                        generated_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
+                        generated_images = self.rendering.render(generated_images, sampled_labels)
                         sampled_labels = self.rendering.renderlabels(sampled_labels) if self.labels else None
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
@@ -1437,7 +1434,7 @@ class Trainer():
         self.GAN.G_opt.zero_grad()
 
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D_aug]):
-            latents = torch.randn(batch_size, latent_dim).to(self.device)
+            latents = torch.randn(batch_size, latent_dim, device=self.device)
 
             if G_requires_calc_real:
                 if self.labels:
@@ -1457,7 +1454,7 @@ class Trainer():
                 generated_images = G(latents, label=swapped_sampled_labels)
                 # generated_images = G(latents, label=label_batch)
                 if self.render:
-                    generated_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
+                    generated_images = self.rendering.render(generated_images, sampled_labels)
                     sampled_labels = self.rendering.renderlabels(sampled_labels) if self.labels else None
 
                 fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, **aug_kwargs)
@@ -1565,7 +1562,7 @@ class Trainer():
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
         if self.render:
             sampled_labels = self.sample_label(generated_images.shape[0]) if self.labels else None
-            rendered_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
+            rendered_images = self.rendering.render(generated_images, sampled_labels)
             if self.run is not None:
                 aim_images = []
                 for idx, image in enumerate(rendered_images):
@@ -1618,7 +1615,7 @@ class Trainer():
         # regular
         if 'default' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated default images'):
-                latents = torch.randn((1, latent_dim)).to(self.device)
+                latents = torch.randn(1, latent_dim, device=self.device)
                 generated_image = self.generate_(self.GAN.G, latents)
                 path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}.{ext}')
                 torchvision.utils.save_image(generated_image[0], path, nrow=1)
@@ -1626,7 +1623,7 @@ class Trainer():
         # moving averages
         if 'ema' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated EMA images'):
-                latents = torch.randn((1, latent_dim)).to(self.device)
+                latents = torch.randn(1, latent_dim, device=self.device)
                 generated_image = self.generate_(self.GAN.GE, latents)
                 path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema.{ext}')
                 torchvision.utils.save_image(generated_image[0], path, nrow=1)
@@ -1653,7 +1650,7 @@ class Trainer():
             self.GAN.eval()
 
             if checkpoint == 0:
-                latents = torch.randn((num_images, self.GAN.latent_dim)).to(self.device)
+                latents = torch.randn(num_images, self.GAN.latent_dim, device=self.device)
 
             # regular
             if 'default' in types:
@@ -1702,7 +1699,7 @@ class Trainer():
 
         for batch_num in tqdm(range(num_batches), desc='calculating FID - saving generated'):
             # latents and noise
-            latents = torch.randn(self.batch_size, latent_dim).to(self.device)
+            latents = torch.randn(self.batch_size, latent_dim, device=self.device)
 
             # moving averages
             generated_images = self.generate_(self.GAN.GE, latents)
@@ -1730,8 +1727,8 @@ class Trainer():
         # image_size = self.GAN.image_size
 
         # latents and noise
-        latents_low = torch.randn(num_rows ** 2, latent_dim).to(self.device)
-        latents_high = torch.randn(num_rows ** 2, latent_dim).to(self.device)
+        latents_low = torch.randn(num_rows ** 2, latent_dim, device=self.device)
+        latents_high = torch.randn(num_rows ** 2, latent_dim, device=self.device)
 
         ratios = torch.linspace(0., 8., num_steps)
 
