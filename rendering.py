@@ -10,19 +10,13 @@ from pytorch3d.renderer import TexturesUV, TexturesVertex
 
 from pytorch3d.renderer import (
     look_at_view_transform,
+    AlphaCompositor,
     PerspectiveCameras,
     PointsRasterizationSettings,
     PointsRasterizer,
+    PointsRenderer,
     PulsarPointsRenderer
 )
-
-# TODO
-# normalize vertices by centering and scaling
-def normalize_verts(verts):
-    mean = verts.mean(axis=1) # vertices mean
-    max = (verts - mean).square().sum(axis=2).sqrt().max() # largest variation from mean
-    return (verts - mean) / max
-
 
 ## rendering class
 
@@ -34,6 +28,7 @@ class Rendering():
         point_radius = 8e-4,
         gamma = 1e-3,
         num_points = 10**6,
+        mesh_obj_path=None,
         smplx_model_path = None,
         rank = 0
     ):
@@ -51,19 +46,45 @@ class Rendering():
         self.znear = 1.0
         self.background = torch.ones((3,), device=self.device)
 
-        # smplx model, faces and uvs are always the same
-        self.smplx_model = smplx.SMPLXLayer(smplx_model_path, gender='neutral', device=self.device)
-        self.smplx_faces = self.smplx_model.faces_tensor.unsqueeze(0)
+        self.smplx_model_path = smplx_model_path
+        self.mesh_obj_path = mesh_obj_path
 
-        smplx_uv_path = os.path.join(smplx_model_path, 'smplx_uv.obj')
-        self.smplx_uvs = self.get_smplx_uvs(smplx_uv_path)
+        # TODO : requirement, mesh_obj_path requires a dataset.json file with azimuth and elevations! focal length is fixed
+        if smplx_model_path:
+            # smplx model, faces and uvs are always the same
+            self.smplx_model = smplx.SMPLXLayer(smplx_model_path, gender='neutral').to(self.device)
+            self.smplx_faces = self.smplx_model.faces_tensor.unsqueeze(0)
 
-        # TODO
-        # camera view settings
-        self.azimuths = np.arange(-180, 180, 1)
-        self.elevations = np.arange(-30, 30, 1)
-        elev_probs = np.exp( -np.square((self.elevations)/15) ) # exp( -(x/15)**2 )
-        self.elev_probs = elev_probs / elev_probs.sum()
+            smplx_uv_path = os.path.join(smplx_model_path, 'smplx_uv.obj')
+            self.smplx_uvs = self.get_smplx_uvs(smplx_uv_path)
+
+        else: # mesh_obj_path is not None
+            mesh_object = load_obj(mesh_obj_path, load_textures=False, device=self.device)
+            self.obj_verts = self.normalize_verts( mesh_object[0].unsqueeze(0) )
+            self.obj_faces = mesh_object[1].verts_idx # .unsqueeze(0)
+
+            obj_faces_uvs = mesh_object[1].textures_idx
+            obj_verts_uvs = mesh_object[2].verts_uvs
+            self.obj_uvs = obj_faces_uvs, obj_verts_uvs
+
+    def point_renderer(self, cameras):
+        raster_settings = PointsRasterizationSettings(
+            image_size = self.image_size,
+            radius = self.point_radius,
+            points_per_pixel = self.points_per_pixel
+        )
+
+        rasterizer = PointsRasterizer(
+            cameras = cameras,
+            raster_settings = raster_settings
+        )
+
+        renderer = PointsRenderer(
+            rasterizer=rasterizer,
+            compositor=AlphaCompositor(background_color=self.background)
+            ).to(self.device)
+
+        return renderer
 
     def pulsar_renderer(self, cameras):
         raster_settings = PointsRasterizationSettings(
@@ -81,23 +102,11 @@ class Rendering():
 
         return renderer
 
-    def get_mesh(self, mesh_obj_path, texture, batch_size):
-        verts, faces, properties = load_obj(mesh_obj_path, load_textures=False)
-        verts_uvs = properties.verts_uvs.unsqueeze(0).to(self.device)
-        faces_uvs = faces.textures_idx.unsqueeze(0).to(self.device)
-        verts_uvs = verts_uvs.repeat(batch_size, 1, 1) # shape = (b, V, 2)
-        faces_uvs = faces_uvs.repeat(batch_size, 1, 1) # shape = (b, F, 3)
-
-        # verts = normalize_verts(verts.unsqueeze(0))
-        verts = verts.unsqueeze(0).to(self.device)
-        faces = faces.verts_idx.unsqueeze(0).to(self.device)
-        verts = verts.repeat(batch_size, 1, 1) # shape = (b, num_verts, 3)
-        faces = faces.repeat(batch_size, 1, 1) # shape = (b, num_faces, 3)
-
-        texture = torch.moveaxis(texture, 1, 3).clamp_(0., 1.)
-        texture_uv = TexturesUV(maps=texture, faces_uvs=faces_uvs, verts_uvs=verts_uvs)
-
-        return Meshes(verts, faces, texture_uv)
+    # normalize vertices by centering and scaling
+    def normalize_verts(self, verts):
+        mean = verts.mean(axis=1) # vertices mean
+        max = (verts - mean).square().sum(axis=2).sqrt().max() # largest variation from mean
+        return (verts - mean) / max
 
     def get_smplx_uvs(self, smplx_uv_path):
         obj_mesh = load_obj(smplx_uv_path, load_textures=False, device=self.device)
@@ -121,7 +130,7 @@ class Rendering():
     # smplx mesh from parameters provided via labels
     def get_smplx_mesh(self, labels, texture=None):
         global_orient, body_pose, jaw_pose, left_hand_pose, right_hand_pose, expression, betas, camera = labels
-        b = global_orient.shape[0] # batch size
+        batch_size = global_orient.shape[0]
 
         # smplx vertices
         smplx_verts = self.smplx_model.forward(global_orient=global_orient,
@@ -130,7 +139,7 @@ class Rendering():
                                                              left_hand_pose=left_hand_pose,
                                                              right_hand_pose=right_hand_pose,
                                                              expression=expression,
-                                                             betas=betas, device=self.device)['vertices']
+                                                             betas=betas)['vertices'].to(self.device)
 
         # project vertices to image space
         smplx_verts = self.orth_project(smplx_verts, camera)
@@ -140,11 +149,22 @@ class Rendering():
             color = torch.ones_like(smplx_verts, device=self.device)
             texture = TexturesVertex(color)
         else:
-        faces_uvs, verts_uvs = self.smplx_uvs
+            faces_uvs, verts_uvs = self.smplx_uvs
             texturemap = torch.moveaxis(texture, 1, 3).clamp(0., 1.)
-            texture = TexturesUV(texturemap, [faces_uvs] * b, [verts_uvs] * b)
+            texture = TexturesUV(texturemap, [faces_uvs] * batch_size, [verts_uvs] * batch_size)
 
-        return Meshes(smplx_verts, [self.smplx_faces] * b, texture)
+        return Meshes(smplx_verts, self.smplx_faces.repeat(batch_size, 1, 1), texture)
+
+    def get_obj_mesh(self, batch_size, texture=None):
+        if texture is None:
+            color = torch.ones_like(self.obj_verts, device=self.device)
+            texture = TexturesVertex(color)
+        else:
+            faces_uvs, verts_uvs = self.obj_uvs
+            texturemap = torch.moveaxis(texture, 1, 3).clamp(0., 1.)
+            texture = TexturesUV(texturemap, [faces_uvs] * batch_size, [verts_uvs] * batch_size)
+
+        return Meshes(self.obj_verts.repeat(batch_size, 1, 1), self.obj_faces.repeat(batch_size, 1, 1), texture)
 
     # sample points from mesh
     def get_pointcloud(self, mesh):
@@ -158,29 +178,29 @@ class Rendering():
     # TODO
     # also, does not support greyscale nor transparent : make assert in model.py
     # rename label to param or smth that makes more sense
-    def render(self, texture, label):
+    def render(self, texture, label, renderer='pulsar'):
+        assert renderer in ('default', 'pulsar'), 'renderer has to be default or pulsar'
         batch_size = texture.shape[0]
-
-        # azim = np.random.choice(self.azimuths, b, replace=True) if label is None else label[:,0]
-        # elev = np.random.choice(self.elevations, b, replace=True, p=self.elev_probs) if label is None else label[:,1]
-        # dist = 10
 
         # camera
         dist = 10
-        azim = (180,) * batch_size
-        elev = (0,) * batch_size
-        R, T = look_at_view_transform(dist=10, elev=elev, azim=azim)
+        azim = (180,) if self.smplx_model_path else label[:,0]
+        elev = (0,) if self.smplx_model_path else label[:,1]
+        azim *= batch_size
+        elev *= batch_size
+
+        R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
         cameras = PerspectiveCameras(focal_length=dist, R=R, T=T, device=self.device)
-        renderer = self.pulsar_renderer(cameras)
+        r = self.pulsar_renderer(cameras) if renderer == 'pulsar' else self.point_renderer(cameras)
 
         # get mesh and pointcloud
-        mesh = self.get_smplx_mesh(label, texture)
+        mesh = self.get_smplx_mesh(label, texture) if self.smplx_model_path else self.get_obj_mesh(batch_size, texture)
         pointcloud = self.get_pointcloud(mesh)
 
         # pulsar rendering
         gamma = (self.gamma,) * batch_size
         znear = (self.znear,) * batch_size
         zfar = (2 * dist,) * batch_size
-        image = renderer(pointcloud, gamma=gamma, znear=znear, zfar=zfar, bg_col=self.background)[..., :3]
+        image = r(pointcloud, gamma=gamma, znear=znear, zfar=zfar, bg_col=self.background)[..., :3]
 
         return torch.moveaxis(image, 3, 1)

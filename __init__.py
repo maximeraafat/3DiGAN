@@ -1,1 +1,1 @@
-from .model import 3DiGAN, Generator, Discriminator, Trainer, NanException
+from .model import Module3DiGAN, Generator, Discriminator, Trainer, NanException

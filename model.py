@@ -41,7 +41,7 @@ from adabelief_pytorch import AdaBelief
 
 
 # assert
-assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
+assert torch.cuda.is_available(), 'You need to have an NVIDIA GPU with CUDA installed.'
 
 # constants
 NUM_CORES = multiprocessing.cpu_count()
@@ -95,11 +95,9 @@ def gradient_accumulate_contexts(gradient_accumulate_every, is_ddp, ddps):
         with context():
             yield
 
-# TODO : if smplx, then second chunked_outputs, otherwise first
 def evaluate_in_chunks(max_batch_size, model, *args):
     split_args = list(zip(*list(map(lambda x: x.split(max_batch_size, dim=0), args))))
-    # chunked_outputs = [model(*i) for i in split_args]
-    chunked_outputs = [model(i[0], i[1:]) for i in split_args]
+    chunked_outputs = [model(*i) for i in split_args]
     if len(chunked_outputs) == 1:
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
@@ -376,10 +374,13 @@ class ImageDataset(Dataset):
         self,
         folder,
         image_size,
-        labels = False,
         transparent = False,
         greyscale = False,
-        aug_prob = 0.
+        aug_prob = 0.,
+        render = False,
+        mesh_obj_path = None,
+        smplx_model_path = None,
+        labelpath = None
     ):
         super().__init__()
         self.folder = folder
@@ -389,18 +390,18 @@ class ImageDataset(Dataset):
 
         # TODO : replace with self.smplx_labels (also in cli), to distinguish different types of conditionning: our work only supports smplx tho
         # in final github readme, provide instructions + notebook on how to obtain smplx parameters from pixie, and how they are stored in the .npz file
-        self.labels = self.load_smplx_labels() if labels else None
+        self.render = render
+        self.mesh_obj_path = mesh_obj_path
+        self.smplx_model_path = smplx_model_path
+        self.labels = None if not render else ( self.camera_labels(labelpath) if mesh_obj_path else self.smplx_labels(labelpath) )
 
         if transparent:
-            num_channels = 4
             pillow_mode = 'RGBA'
             expand_fn = expand_greyscale(transparent)
         elif greyscale:
-            num_channels = 1
             pillow_mode = 'L'
             expand_fn = identity()
         else:
-            num_channels = 3
             pillow_mode = 'RGB'
             expand_fn = expand_greyscale(transparent)
 
@@ -415,10 +416,10 @@ class ImageDataset(Dataset):
             transforms.Lambda(expand_fn)
         ])
 
-    def load_smplx_labels(self):
-        '''
-        filename = 'dataset.json'
-        with open(os.path.join(self.folder, filename)) as f:
+    # TODO : if path is provided, look under path, othwerise look for file called dataset.json within the training folder
+    def camera_labels(self, filepath=None):
+        filepath = os.path.join(self.folder, 'dataset.json') if filepath is None else filepath
+        with open(filepath) as f:
             labels = json.load(f)['labels']
         if labels is None:
             return None
@@ -427,22 +428,24 @@ class ImageDataset(Dataset):
         labels = torch.Tensor(labels).to(dtype=torch.float)
 
         return labels
-        '''
 
-        filename = 'dataset.npz'
-        labels = np.load(os.path.join(self.folder, filename))
+    # TODO : if path is provided, look under path, othwerise look for file called dataset.npz within the training folder
+    def smplx_labels(self, filepath=None):
+        filepath = os.path.join(self.folder, 'dataset.npz') if filepath is None else filepath
+        parameters = np.load(filepath)
 
-        global_orient = torch.Tensor(labels['global_orient'])
-        body_pose = torch.Tensor(labels['body_pose'])
-        jaw_pose = torch.Tensor(labels['jaw_pose'])
-        left_hand_pose = torch.Tensor(labels['left_hand_pose'])
-        right_hand_pose = torch.Tensor(labels['right_hand_pose'])
-        expression = torch.Tensor(labels['expression'])
-        betas = torch.Tensor(labels['betas'])
-        cam = torch.Tensor(labels['cam'])
+        global_orient = torch.Tensor(parameters['global_orient'])
+        body_pose = torch.Tensor(parameters['body_pose'])
+        jaw_pose = torch.Tensor(parameters['jaw_pose'])
+        left_hand_pose = torch.Tensor(parameters['left_hand_pose'])
+        right_hand_pose = torch.Tensor(parameters['right_hand_pose'])
+        expression = torch.Tensor(parameters['expression'])
+        betas = torch.Tensor(parameters['betas'])
+        cam = torch.Tensor(parameters['cam'])
 
         return global_orient, body_pose, jaw_pose, left_hand_pose, right_hand_pose, expression, betas, cam
 
+    # TODO : call get_labels_idx and labels_to_device within the above function, and rectify __getitem__
     def get_labels_idx(self, idx):
         return tuple([ tensor[idx] for tensor in self.labels ])
 
@@ -455,8 +458,14 @@ class ImageDataset(Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
-        return (self.transform(img), *self.get_labels_idx(index)) if self.labels is not None else self.transform(img)
-        # return (self.transform(img), self.labels[index]) if self.labels is not None else self.transform(img)
+
+        # TODO: improve this
+        if self.render and self.mesh_obj_path:
+            return (self.transform(img), self.labels[index]) if self.labels is not None else self.transform(img)
+        elif self.render and self.smplx_model_path:
+            return (self.transform(img), *self.get_labels_idx(index)) if self.labels is not None else self.transform(img)
+        else:
+            return self.transform(img)
 
 
 ## augmentations
@@ -471,7 +480,7 @@ class AugWrapper(nn.Module):
         super().__init__()
         self.D = D
 
-    def forward(self, images, labels=None, prob=0., types=[], detach=False, **kwargs):
+    def forward(self, images, prob=0., types=[], detach=False, **kwargs):
         context = torch.no_grad if detach else null_context
 
         with context():
@@ -479,7 +488,7 @@ class AugWrapper(nn.Module):
                 images = random_hflip(images, prob=0.5)
                 images = DiffAugment(images, types=types)
 
-        return self.D(images, labels, **kwargs)
+        return self.D(images, **kwargs)
 
 # modifiable global variables
 norm_class = nn.BatchNorm2d
@@ -626,9 +635,6 @@ class Generator(nn.Module):
             init_channel = 1
         else:
             init_channel = 3
-
-        # TODO : if possible, set device from image or availabe tensors (everywhere)
-        # self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         fmap_max = default(fmap_max, latent_dim)
 
@@ -921,7 +927,7 @@ class Discriminator(nn.Module):
 
         return out, out_32x32, aux_loss
 
-class 3DiGAN(nn.Module):
+class Module3DiGAN(nn.Module):
     def __init__(
         self,
         *,
@@ -939,9 +945,9 @@ class 3DiGAN(nn.Module):
         freq_chan_attn = False,
         ttur_mult = 1.,
         lr = 2e-4,
-        rank = 0,
-        ddp = False
+        rank = 0
     ):
+        # TODO: enable displacements!
         super().__init__()
         device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
         resolution = render_size if render else image_size
@@ -1023,17 +1029,19 @@ class Trainer():
         optimizer = 'adam',
         num_workers = None,
         latent_dim = 256,
-        image_size = 128, # TODO
-        render_size = 1024, # TODO
+        image_size = 256,
+        render_size = 256,
         num_image_tiles = 8,
         fmap_max = 512,
         transparent = False,
         greyscale = False,
         render = False,
+        renderer = 'default',
         displacement = False,
-        labels = False,
+        labelpath = None,
         gamma = 1e-2,
-        radius = 0.0006,
+        radius = 0.0005,
+        mesh_obj_path = None,
         smplx_model_path = None,
         smoothing = 0,
         batch_size = 4,
@@ -1045,7 +1053,6 @@ class Trainer():
         dual_contrast_loss = False,
         antialias = False,
         lr = 2e-4,
-        lr_mlp = 1.,
         ttur_mult = 1.,
         save_every = 1000,
         evaluate_every = 1000,
@@ -1097,15 +1104,23 @@ class Trainer():
         self.transparent = transparent
         self.greyscale = greyscale
         self.render = render
+        self.renderer = renderer
         self.displacement = displacement
-        self.labels = labels
+        self.labelpath = labelpath
         self.smoothing = smoothing
+        self.mesh_obj_path = mesh_obj_path
         self.smplx_model_path = smplx_model_path
         self.gamma = gamma
         self.radius = radius
         self.num_points = 10**5
 
-        self.swapping_prob = 0 # TODO : delete if regularization not needed
+        # TODO : instead of having mesh_obj_path and smplx_model_path, have a single string object
+
+        # perhaps select better radii
+        if radius is None: self.radius = 0.0005 if renderer == 'pulsar' else 0.01
+
+        # exclusively one of mesh_obj_path and smplx_model_path has to be a valid path
+        if render: assert (mesh_obj_path and smplx_model_path) is None and (mesh_obj_path or smplx_model_path) is not None
 
         assert (int(self.transparent) + int(self.greyscale)) < 2, 'you can only set either transparency or greyscale'
         assert 0 <= self.smoothing <= 1, 'label smoothing has to be between 0 and 1'
@@ -1205,7 +1220,7 @@ class Trainer():
             dist.init_process_group('nccl', rank=0, world_size=1)
 
         # instantiate GAN
-        self.GAN = 3DiGAN(
+        self.GAN = Module3DiGAN(
             optimizer=self.optimizer,
             lr = self.lr,
             latent_dim = self.latent_dim,
@@ -1219,8 +1234,7 @@ class Trainer():
             transparent = self.transparent,
             greyscale = self.greyscale,
             render = self.render,
-            displacement = self.displacement,
-            labels = self.labels,
+            # displacement = self.displacement,
             rank = self.rank,
             *args,
             **kwargs
@@ -1228,7 +1242,7 @@ class Trainer():
 
         if self.render:
             from rendering import Rendering # no need for pytorch3d if no rendering
-            self.rendering = Rendering(image_size=self.render_size, point_radius=self.radius, gamma=self.gamma, num_points=self.num_points, smplx_model_path=self.smplx_model_path, rank=self.rank)
+            self.rendering = Rendering(image_size=self.render_size, point_radius=self.radius, gamma=self.gamma, num_points=self.num_points, mesh_obj_path=self.mesh_obj_path, smplx_model_path=self.smplx_model_path, rank=self.rank)
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank], 'output_device': self.rank, 'find_unused_parameters': True}
@@ -1251,7 +1265,6 @@ class Trainer():
         self.greyscale = config.pop('greyscale', False)
         self.render = config.pop('render', False)
         self.displacement = config.pop('displacement', False)
-        self.labels = config.pop('conditional', False)
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
         self.optimizer = config.pop('optimizer', 'adam')
@@ -1268,7 +1281,6 @@ class Trainer():
             'greyscale': self.greyscale,
             'render': self.render,
             'displacement': self.displacement,
-            'conditional' : self.labels,
             'syncbatchnorm': self.syncbatchnorm,
             'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
@@ -1279,7 +1291,7 @@ class Trainer():
     def set_data_src(self, folder):
         num_workers = default(self.num_workers, math.ceil(NUM_CORES / self.world_size))
         resolution = self.render_size if self.render else self.image_size
-        self.dataset = ImageDataset(folder, resolution, labels=self.labels, transparent=self.transparent, greyscale=self.greyscale, aug_prob=self.dataset_aug_prob)
+        self.dataset = ImageDataset(folder, resolution, transparent=self.transparent, greyscale=self.greyscale, aug_prob=self.dataset_aug_prob, render=self.render, mesh_obj_path=self.mesh_obj_path, smplx_model_path=self.smplx_model_path, labelpath=self.labelpath)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = DataLoader(self.dataset, num_workers=num_workers, batch_size=math.ceil(self.batch_size / self.world_size), sampler=sampler, shuffle=not self.is_ddp, drop_last=True, pin_memory=True)
         self.loader = cycle(dataloader)
@@ -1290,47 +1302,38 @@ class Trainer():
             self.aug_prob = min(0.5, (1e5 - num_samples) * 3e-6)
             print(f'autosetting augmentation probability to {round(self.aug_prob * 100)}%')
 
-    def sample_label(self, size, swapping=False):
-        idx = np.random.choice(self.dataset.labels[0].shape[0], size, replace=True)
-        labels = self.dataset.get_labels_idx(idx)
-        labels = self.dataset.labels_to_device(labels, self.device)
-        # labels = torch.Tensor(self.dataset.labels[idx]).to(self.device)
-
-        if swapping:
-            # swap labels for which label[i] satisfies random[i] > self.swapping_prob
-            swapped_idx = np.random.choice(self.dataset.labels[0].shape[0], size, replace=True)
-            swapped_idx = np.where(np.random.rand(size) > self.swapping_prob, idx, swapped_idx)
-            swapped_labels = self.dataset.get_labels_idx(swapped_idx)
-            swapped_labels = self.dataset.labels_to_device(swapped_labels, self.device)
-            # swapped_labels = torch.Tensor(self.dataset.labels[swapped_idx]).to(self.device)
-            return labels, swapped_labels
-
+    def sample_label(self, size):
+        # TODO : make this code better
+        if self.mesh_obj_path:
+            idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
+            labels = self.dataset.labels[idx]
+        else:
+            idx = np.random.choice(self.dataset.labels[0].shape[0], size, replace=True)
+            labels = self.dataset.get_labels_idx(idx)
+            labels = self.dataset.labels_to_device(labels, self.device)
         return labels
 
-    # TODO : optimize for GPU memory
     def train(self):
         assert exists(self.loader), 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
 
         if not exists(self.GAN):
             self.init_GAN()
 
-        self.GAN.train() # TODO : what does this do?
+        self.GAN.train()
         total_disc_loss = torch.zeros([], device=self.device)
         total_gen_loss = torch.zeros([], device=self.device)
 
         batch_size = math.ceil(self.batch_size / self.world_size)
 
-        # TODO : is there a reason for self.GAN.object?
-        # image_size = self.GAN.image_size
-        latent_dim = self.latent_dim # self.GAN.latent_dim
+        latent_dim = self.latent_dim
 
         aug_prob   = default(self.aug_prob, 0)
         aug_types  = self.aug_types
         aug_kwargs = {'prob': aug_prob, 'types': aug_types}
 
         G = self.GAN.G if not self.is_ddp else self.G_ddp
-        # D = self.GAN.D if not self.is_ddp else self.D_ddp
-        D_aug = self.GAN.D_aug if not self.is_ddp else self.D_aug_ddp
+        # D = self.GAN.D if not self.is_ddp else self.D_ddp
+        D = self.GAN.D_aug if not self.is_ddp else self.D_aug_ddp
 
         apply_gradient_penalty = self.steps % 4 == 0
 
@@ -1346,16 +1349,17 @@ class Trainer():
         # train discriminator
         self.GAN.D_opt.zero_grad()
 
-        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D_aug, G]):
+        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D, G]):
             latents = torch.randn(batch_size, latent_dim, device=self.device)
 
-            if self.labels:
+            if self.render and self.smplx_model_path:
                 next_sample = next(self.loader)
                 # TODO : when loading data, write specialized function which take data + labels and split according to labels (smplx params in our case)
                 image_batch, label_batch = next_sample[0], next_sample[1:]
                 image_batch, label_batch = image_batch.to(self.device), self.dataset.labels_to_device(label_batch, self.device)
-                label_batch = self.rendering.renderlabels(label_batch)
-                # label_batch = label_batch #.to(self.device)
+            elif self.render and self.mesh_obj_path:
+                image_batch, label_batch = next(self.loader)
+                image_batch, label_batch = image_batch.to(self.device), label_batch.to(self.device)
             else:
                 image_batch = next(self.loader).to(self.device)
                 label_batch = None
@@ -1363,17 +1367,13 @@ class Trainer():
 
             with amp_context():
                 with torch.no_grad():
-                    sampled_labels, swapped_sampled_labels = self.sample_label(batch_size, True) if self.labels else (None, None)
-                    swapped_sampled_labels = self.rendering.renderlabels(swapped_sampled_labels) if self.labels else None
-                    generated_images = G(latents, label=swapped_sampled_labels)
-                    # generated_images = G(latents, label=label_batch)
+                    sampled_labels = self.sample_label(batch_size) if self.render else None
+                    generated_images = G(latents)
                     if self.render:
-                        generated_images = self.rendering.render(generated_images, sampled_labels)
-                        sampled_labels = self.rendering.renderlabels(sampled_labels) if self.labels else None
+                        generated_images = self.rendering.render(generated_images, sampled_labels, self.renderer)
 
-                fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, detach=True, **aug_kwargs)
-                # fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=label_batch, detach=True, **aug_kwargs)
-                real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, labels=label_batch, calc_aux_loss=True, **aug_kwargs)
+                fake_output, fake_output_32x32, _ = D(generated_images, detach=True, **aug_kwargs)
+                real_output, real_output_32x32, real_aux_loss = D(image_batch, calc_aux_loss=True, **aug_kwargs)
 
                 real_output_loss = real_output
                 fake_output_loss = fake_output
@@ -1433,33 +1433,30 @@ class Trainer():
         # train generator
         self.GAN.G_opt.zero_grad()
 
-        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D_aug]):
+        for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D]):
             latents = torch.randn(batch_size, latent_dim, device=self.device)
 
             if G_requires_calc_real:
-                if self.labels:
+                if self.render and self.smplx_model_path:
                     next_sample = next(self.loader)
                     image_batch, label_batch = next_sample[0], next_sample[1:]
                     image_batch, label_batch = image_batch.to(self.device), self.dataset.labels_to_device(label_batch, self.device)
-                    label_batch = self.rendering.renderlabels(label_batch)
-                    # label_batch = label_batch.to(self.device)
+                elif self.render and self.mesh_obj_path:
+                    image_batch, label_batch = next(self.loader)
+                    image_batch, label_batch = image_batch.to(self.device), label_batch.to(self.device)
                 else:
                     image_batch = next(self.loader).to(self.device)
                     label_batch = None
                 image_batch.requires_grad_()
 
             with amp_context():
-                sampled_labels, swapped_sampled_labels = self.sample_label(batch_size, True) if self.labels else (None, None)
-                swapped_sampled_labels = self.rendering.renderlabels(swapped_sampled_labels) if self.labels else None
-                generated_images = G(latents, label=swapped_sampled_labels)
-                # generated_images = G(latents, label=label_batch)
+                sampled_labels = self.sample_label(batch_size) if self.render else None
+                generated_images = G(latents)
                 if self.render:
-                    generated_images = self.rendering.render(generated_images, sampled_labels)
-                    sampled_labels = self.rendering.renderlabels(sampled_labels) if self.labels else None
+                    generated_images = self.rendering.render(generated_images, sampled_labels, self.renderer)
 
-                fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=sampled_labels, **aug_kwargs)
-                # fake_output, fake_output_32x32, _ = D_aug(generated_images, labels=label_batch, **aug_kwargs)
-                real_output, real_output_32x32, _ = D_aug(image_batch, labels=label_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
+                fake_output, fake_output_32x32, _ = D(generated_images, **aug_kwargs)
+                real_output, real_output_32x32, _ = D(image_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
 
                 loss = G_loss_fn(real_output, fake_output)
                 loss_32x32 = G_loss_fn(real_output_32x32, fake_output_32x32)
@@ -1517,8 +1514,7 @@ class Trainer():
         ext = self.image_extension
         num_rows = num_image_tiles
 
-        latent_dim = self.latent_dim # self.GAN.latent_dim
-        # image_size = self.GAN.image_size
+        latent_dim = self.latent_dim
 
         # latents and noise
         def image_to_pil(image):
@@ -1561,8 +1557,8 @@ class Trainer():
                            context={'ema': False})
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
         if self.render:
-            sampled_labels = self.sample_label(generated_images.shape[0]) if self.labels else None
-            rendered_images = self.rendering.render(generated_images, sampled_labels)
+            sampled_labels = self.sample_label(generated_images.shape[0]) if self.render else None
+            rendered_images = self.rendering.render(generated_images, sampled_labels, self.renderer)
             if self.run is not None:
                 aim_images = []
                 for idx, image in enumerate(rendered_images):
@@ -1587,8 +1583,8 @@ class Trainer():
                            context={'ema': True})
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
         if self.render:
-            sampled_labels = self.sample_label(generated_images.shape[0]) if self.labels else None
-            rendered_images = self.rendering.render(generated_images, sampled_labels, self.gamma, self.radius, self.num_points)
+            sampled_labels = self.sample_label(generated_images.shape[0]) if self.render else None
+            rendered_images = self.rendering.render(generated_images, sampled_labels, self.renderer)
             if self.run is not None:
                 aim_images = []
                 for idx, image in enumerate(rendered_images):
@@ -1678,7 +1674,8 @@ class Trainer():
             os.makedirs(real_path)
 
             for batch_num in tqdm(range(num_batches), desc='calculating FID - saving reals'):
-                if self.labels:
+                # TODO : simplify below
+                if self.render:
                     real_batch = next(self.loader)[0].to(self.device)
                 else:
                     real_batch = next(self.loader).to(self.device)
@@ -1694,8 +1691,7 @@ class Trainer():
         self.GAN.eval()
         ext = self.image_extension
 
-        latent_dim = self.latent_dim # self.GAN.latent_dim
-        # image_size = self.GAN.image_size
+        latent_dim = self.latent_dim
 
         for batch_num in tqdm(range(num_batches), desc='calculating FID - saving generated'):
             # latents and noise
@@ -1711,10 +1707,8 @@ class Trainer():
         return fid_score.calculate_fid_given_paths([str(real_path), str(fake_path)], 256, latents.device, 2048)
 
     @torch.no_grad()
-    def generate_(self, G, style, num_image_tiles=8):
-        label = self.sample_label(style.shape[0]) if self.labels else None
-        arguments = (style, *label) if self.labels else (style,)
-        generated_images = evaluate_in_chunks(self.batch_size, G, True, *arguments)
+    def generate_(self, G, style):
+        generated_images = evaluate_in_chunks(self.batch_size, G, style)
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
@@ -1723,8 +1717,7 @@ class Trainer():
         ext = self.image_extension
         num_rows = num_image_tiles
 
-        latent_dim = self.latent_dim # self.GAN.latent_dim
-        # image_size = self.GAN.image_size
+        latent_dim = self.latent_dim
 
         # latents and noise
         latents_low = torch.randn(num_rows ** 2, latent_dim, device=self.device)

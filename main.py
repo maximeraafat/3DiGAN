@@ -12,7 +12,6 @@ from diff_augment_test import DiffAugmentTest
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from torchvision.transforms import ToPILImage
 
 import numpy as np
 
@@ -86,17 +85,19 @@ def train_from_folder(
     new = False,
     load_from = -1,
     image_size = 256,
-    render_size = 256, # 1024
+    render_size = 256, # 1024
     optimizer = 'adam',
     fmap_max = 512,
     transparent = False,
     greyscale = False,
     latent_dim = 256,
     render = False,
+    renderer = 'default', # 'pulsar'
     displacement = False,
-    labels = False,
+    labelpath = None,
     gamma = 1e-3,
-    radius = 8e-4,
+    radius = None, #  8e-4, # different radius for 'default' and 'pulsar'
+    mesh_obj_path = None,
     smplx_model_path = None,
     smoothing = 0,
     batch_size = 8,
@@ -160,10 +161,12 @@ def train_from_folder(
         greyscale = greyscale,
         latent_dim = latent_dim,
         render = render,
+        renderer = renderer,
         displacement = displacement,
-        labels = labels,
+        labelpath = labelpath,
         gamma = gamma,
         radius = radius,
+        mesh_obj_path = mesh_obj_path,
         smplx_model_path = smplx_model_path,
         smoothing = smoothing,
         ttur_mult = ttur_mult,
@@ -218,6 +221,8 @@ def train_from_folder(
         join = True
     )
 
-
 def main():
-    fire.Fire(train_from_folder)
+     fire.Fire(train_from_folder)
+
+if __name__ == '__main__':
+    sys.exit(main())
