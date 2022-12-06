@@ -28,7 +28,7 @@ class Rendering():
         point_radius = 8e-4,
         gamma = 1e-3,
         num_points = 10**6,
-        mesh_obj_path=None,
+        mesh_obj_path = None,
         smplx_model_path = None,
         rank = 0
     ):
@@ -46,26 +46,24 @@ class Rendering():
         self.znear = 1.0
         self.background = torch.ones((3,), device=self.device)
 
-        self.smplx_model_path = smplx_model_path
         self.mesh_obj_path = mesh_obj_path
+        self.smplx_model_path = smplx_model_path
 
-        # TODO : requirement, mesh_obj_path requires a dataset.json file with azimuth and elevations! focal length is fixed
-        if smplx_model_path:
-            # smplx model, faces and uvs are always the same
+        if mesh_obj_path:
+            mesh_object = load_obj(mesh_obj_path, load_textures=False, device=self.device)
+            self.obj_verts = self.normalize_verts( mesh_object[0].unsqueeze(0) )
+            self.obj_faces = mesh_object[1].verts_idx
+
+            obj_faces_uvs = mesh_object[1].textures_idx
+            obj_verts_uvs = mesh_object[2].verts_uvs
+            self.obj_uvs = obj_faces_uvs, obj_verts_uvs
+
+        else:
             self.smplx_model = smplx.SMPLXLayer(smplx_model_path, gender='neutral').to(self.device)
             self.smplx_faces = self.smplx_model.faces_tensor.unsqueeze(0)
 
             smplx_uv_path = os.path.join(smplx_model_path, 'smplx_uv.obj')
             self.smplx_uvs = self.get_smplx_uvs(smplx_uv_path)
-
-        else: # mesh_obj_path is not None
-            mesh_object = load_obj(mesh_obj_path, load_textures=False, device=self.device)
-            self.obj_verts = self.normalize_verts( mesh_object[0].unsqueeze(0) )
-            self.obj_faces = mesh_object[1].verts_idx # .unsqueeze(0)
-
-            obj_faces_uvs = mesh_object[1].textures_idx
-            obj_verts_uvs = mesh_object[2].verts_uvs
-            self.obj_uvs = obj_faces_uvs, obj_verts_uvs
 
     def point_renderer(self, cameras):
         raster_settings = PointsRasterizationSettings(
@@ -168,18 +166,17 @@ class Rendering():
 
     # sample points from mesh
     def get_pointcloud(self, mesh):
-        points_xyz, points_norms, points_text = sample_points_from_meshes(mesh, num_samples=self.num_points, return_normals=True, return_textures=True)
+        xyz, nrm, txt = sample_points_from_meshes(mesh, num_samples=self.num_points, return_normals=True, return_textures=True)
 
-        if points_text.shape[2] > 3:
-            points_xyz += points_norms * points_text[:, :, 3:4].tile([1, 1, 3])
+        # if 4 channel textures, render the last channel as a per point displacement
+        if txt.shape[2] == 4:
+            xyz += nrm * txt[:,:,3:4].tile([1,1,3])
 
-        return Pointclouds(points=points_xyz, features=points_text[:, :, 0:3])
+        return Pointclouds(points=xyz, features=txt[:,:,0:3])
 
-    # TODO
-    # also, does not support greyscale nor transparent : make assert in model.py
-    # rename label to param or smth that makes more sense
+    # if mesh_obj_path : label = azimuth and elevation
+    # otherwise (smplx_model_path) : label = smplx parameters
     def render(self, texture, label, renderer='pulsar'):
-        assert renderer in ('default', 'pulsar'), 'renderer has to be default or pulsar'
         batch_size = texture.shape[0]
 
         # camera
@@ -201,6 +198,6 @@ class Rendering():
         gamma = (self.gamma,) * batch_size
         znear = (self.znear,) * batch_size
         zfar = (2 * dist,) * batch_size
-        image = r(pointcloud, gamma=gamma, znear=znear, zfar=zfar, bg_col=self.background)[..., :3]
+        image = r(pointcloud, gamma=gamma, znear=znear, zfar=zfar, bg_col=self.background)[...,:3]
 
         return torch.moveaxis(image, 3, 1)
