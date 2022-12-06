@@ -113,7 +113,6 @@ def safe_div(n, d):
         res = float(f'{prefix}inf')
     return res
 
-
 ## loss functions
 
 def gen_hinge_loss(real, fake):
@@ -369,11 +368,11 @@ class ImageDataset(Dataset):
         self,
         folder,
         image_size,
+        rendermethod = None,
+        labelpath = None,
         transparent = False,
         greyscale = False,
-        aug_prob = 0.,
-        rendermethod = None,
-        labelpath = None
+        aug_prob = 0.
     ):
         super().__init__()
         self.folder = folder
@@ -470,7 +469,6 @@ class AugWrapper(nn.Module):
 
 # modifiable global variables
 norm_class = nn.BatchNorm2d
-
 
 class PixelShuffleUpsample(nn.Module):
     def __init__(self, dim, dim_out=None):
@@ -592,13 +590,13 @@ class Generator(nn.Module):
         self,
         *,
         image_size,
+        render = False,
+        nodisplace = False,
+        transparent = False,
+        greyscale = False,
         latent_dim = 256,
         fmap_max = 512,
         fmap_inverse_coef = 12,
-        transparent = False,
-        greyscale = False,
-        render = False,
-        nodisplace = False,
         attn_res_layers = [],
         freq_chan_attn = False
     ):
@@ -734,12 +732,12 @@ class Discriminator(nn.Module):
         self,
         *,
         image_size,
-        fmap_max = 512,
-        fmap_inverse_coef = 12,
         transparent = False,
         greyscale = False,
-        disc_output_size = 5,
-        attn_res_layers = []
+        fmap_max = 512,
+        fmap_inverse_coef = 12,
+        attn_res_layers = [],
+        disc_output_size = 5
     ):
         super().__init__()
         resolution = log2(image_size)
@@ -896,21 +894,21 @@ class Module3DiGAN(nn.Module):
     def __init__(
         self,
         *,
-        latent_dim,
         image_size,
         render_size,
-        optimizer = 'adam',
-        fmap_max = 512,
-        fmap_inverse_coef = 12,
-        transparent = False,
-        greyscale = False,
         render = False,
         nodisplace = False,
-        disc_output_size = 5,
+        transparent = False,
+        greyscale = False,
+        optimizer = 'adam',
+        lr = 2e-4,
+        latent_dim = 256,
+        fmap_max = 512,
+        fmap_inverse_coef = 12,
+        ttur_mult = 1,
         attn_res_layers = [],
         freq_chan_attn = False,
-        ttur_mult = 1.,
-        lr = 2e-4,
+        disc_output_size = 5,
         rank = 0
     ):
         super().__init__()
@@ -919,26 +917,25 @@ class Module3DiGAN(nn.Module):
 
         G_kwargs = dict(
             image_size = image_size,
+            render = render,
+            nodisplace = nodisplace,
+            transparent = transparent,
+            greyscale = greyscale,
             latent_dim = latent_dim,
             fmap_max = fmap_max,
             fmap_inverse_coef = fmap_inverse_coef,
-            transparent = transparent,
-            greyscale = greyscale,
-            render = render,
-            nodisplace = nodisplace,
             attn_res_layers = attn_res_layers,
             freq_chan_attn = freq_chan_attn,
-            rank = rank
         )
 
         self.G = Generator(**G_kwargs)
 
         self.D = Discriminator(
             image_size = resolution,
-            fmap_max = fmap_max,
-            fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
+            fmap_max = fmap_max,
+            fmap_inverse_coef = fmap_inverse_coef,
             attn_res_layers = attn_res_layers,
             disc_output_size = disc_output_size
         )
@@ -993,39 +990,40 @@ class Trainer():
         results_dir = 'results',
         models_dir = 'models',
         base_dir = './',
-        optimizer = 'adam',
-        num_workers = None,
-        latent_dim = 256,
         image_size = 256,
         render_size = 256,
-        num_image_tiles = 8,
-        fmap_max = 512,
-        transparent = False,
-        greyscale = False,
         render = False,
         renderer = 'default',
+        nodisplace = False,
+        num_points = 10**5,
+        gamma = 1e-3,
+        radius = None,
+        smoothing = 0,
+        transparent = False,
+        greyscale = False,
         mesh_obj_path = None,
         smplx_model_path = None,
-        nodisplace = False,
         labelpath = None,
-        gamma = 1e-2,
-        radius = 0.0005,
-        smoothing = 0,
-        batch_size = 4,
-        gp_weight = 10,
-        gradient_accumulate_every = 1,
-        attn_res_layers = [],
-        freq_chan_attn = False,
-        disc_output_size = 5,
-        dual_contrast_loss = False,
-        antialias = False,
+        optimizer = 'adam',
         lr = 2e-4,
-        ttur_mult = 1.,
+        latent_dim = 256,
+        fmap_max = 512,
+        ttur_mult = 1,
+        gp_weight = 10,
+        batch_size = 4,
+        gradient_accumulate_every = 1,
         save_every = 1000,
         evaluate_every = 1000,
         aug_prob = None,
         aug_types = ['translation', 'cutout'],
         dataset_aug_prob = 0.,
+        attn_res_layers = [],
+        freq_chan_attn = False,
+        disc_output_size = 5,
+        dual_contrast_loss = False,
+        antialias = False,
+        num_image_tiles = 8,
+        num_workers = None,
         calculate_fid_every = None,
         calculate_fid_num_images = 12800,
         clear_fid_cache = False,
@@ -1054,104 +1052,90 @@ class Trainer():
 
         self.config_path = self.models_dir / name / '.config.json'
 
-        assert is_power_of_two(image_size), 'image size must be a power of 2 (64, 128, 256, 512, 1024)'
-        assert is_power_of_two(render_size), 'render size must be a power of 2 (64, 128, 256, 512, 1024)'
-        assert all(map(is_power_of_two, attn_res_layers)), 'resolution layers of attention must all be powers of 2 (16, 32, 64, 128, 256, 512)'
-
-        assert not (dual_contrast_loss and disc_output_size > 1), 'discriminator output size cannot be greater than 1 if using dual contrastive loss'
-
         self.image_size = image_size
         self.render_size = render_size
-        self.num_image_tiles = num_image_tiles
-
-
         self.render = render
         self.renderer = renderer
-        self.mesh_obj_path = mesh_obj_path
-        self.smplx_model_path = smplx_model_path
         self.nodisplace = nodisplace
-        self.labelpath = labelpath
-        self.smoothing = smoothing
+        self.num_points = num_points
         self.gamma = gamma
         self.radius = radius
-        self.num_points = 10**5
-
-        self.rendermethod = None
-
-        self.latent_dim = latent_dim
-        self.fmap_max = fmap_max
+        self.smoothing = smoothing
         self.transparent = transparent
         self.greyscale = greyscale
 
+        self.mesh_obj_path = mesh_obj_path
+        self.smplx_model_path = smplx_model_path
+        self.labelpath = labelpath
+
+        self.optimizer = optimizer
+        self.lr = lr
+        self.latent_dim = latent_dim
+        self.fmap_max = fmap_max
+        self.ttur_mult = ttur_mult
+        self.gp_weight = gp_weight
+        self.batch_size = batch_size
+        self.gradient_accumulate_every = gradient_accumulate_every
+
+        self.save_every = save_every
+        self.evaluate_every = evaluate_every
+        self.aug_prob = aug_prob
+        self.aug_types = aug_types
+        self.dataset_aug_prob = dataset_aug_prob
+        self.attn_res_layers = attn_res_layers
+        self.freq_chan_attn = freq_chan_attn
+        self.disc_output_size = disc_output_size
+        self.dual_contrast_loss = dual_contrast_loss
+        self.antialias = antialias
+
+        self.num_image_tiles = num_image_tiles
+        self.num_workers = num_workers
+        self.calculate_fid_every = calculate_fid_every
+        self.calculate_fid_num_images = calculate_fid_num_images
+        self.clear_fid_cache = clear_fid_cache
+        self.is_ddp = is_ddp
+        self.rank = rank
+        self.world_size = world_size
+        self.amp = amp
+        self.hparams = hparams
+        self.load_strict = load_strict
+
+        # asserts
+        assert is_power_of_two(image_size), 'image size must be a power of 2 (64, 128, 256, 512, 1024)'
+        assert is_power_of_two(render_size), 'render size must be a power of 2 (64, 128, 256, 512, 1024)'
+        assert all(map(is_power_of_two, attn_res_layers)), 'resolution layers of attention must all be powers of 2 (16, 32, 64, 128, 256, 512)'
+        assert not (dual_contrast_loss and disc_output_size > 1), 'discriminator output size cannot be greater than 1 if using dual contrastive loss'
         assert (int(transparent) + int(greyscale)) < 2, 'you can only set either transparency or greyscale'
         assert 0 <= smoothing <= 1, 'label smoothing has to be between 0 and 1'
 
-        # rendering specific options
+        # rendering specific options and asserts
+        self.rendermethod = None
         if render:
-            # perhaps select better radii
-            self.rendermethod = 'objmesh' if mesh_obj_path else 'smplx'
-
             if radius is None: self.radius = 0.0005 if renderer == 'pulsar' else 0.01
+
+            self.rendermethod = 'objmesh' if mesh_obj_path else 'smplx' # perhaps select better radii
 
             assert renderer in ('default', 'pulsar'), 'renderer has to be default or pulsar'
             assert (mesh_obj_path and smplx_model_path) is None and (mesh_obj_path or smplx_model_path) is not None, 'please set either a mesh object path or a smplx model path'
             assert not (transparent or greyscale), 'the renderer currently does not support the transparent and greyscale options'
 
-        self.aug_prob = aug_prob
-        self.aug_types = aug_types
-
-        self.lr = lr
-        self.optimizer = optimizer
-        self.num_workers = num_workers
-        self.ttur_mult = ttur_mult
-        self.batch_size = batch_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-
-        self.gp_weight = gp_weight
-
-        self.evaluate_every = evaluate_every
-        self.save_every = save_every
+        # training steps and losses tracker
         self.steps = 0
-
-        self.attn_res_layers = attn_res_layers
-        self.freq_chan_attn = freq_chan_attn
-
-        self.disc_output_size = disc_output_size
-        self.antialias = antialias
-
-        self.dual_contrast_loss = dual_contrast_loss
-
         self.d_loss = 0
         self.g_loss = 0
         self.last_gp_loss = None
         self.last_recon_loss = None
         self.last_fid = None
 
-        self.init_folders()
-
-        self.loader = None
-        self.dataset_aug_prob = dataset_aug_prob
-
-        self.calculate_fid_every = calculate_fid_every
-        self.calculate_fid_num_images = calculate_fid_num_images
-        self.clear_fid_cache = clear_fid_cache
-
-        self.is_ddp = is_ddp
-        self.is_main = rank == 0
-        self.rank = rank
-        self.world_size = world_size
-        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
-
-        self.syncbatchnorm = is_ddp
-
-        self.load_strict = load_strict
-
-        self.amp = amp
         self.G_scaler = GradScaler(enabled = self.amp)
         self.D_scaler = GradScaler(enabled = self.amp)
 
+        self.init_folders()
         self.run = None
-        self.hparams = hparams
+        self.loader = None
+        self.is_main = rank == 0
+        self.syncbatchnorm = is_ddp
+        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         if self.is_main and use_aim:
             try:
@@ -1191,20 +1175,20 @@ class Trainer():
 
         # instantiate GAN
         self.GAN = Module3DiGAN(
+            image_size = self.image_size,
+            render_size = self.render_size,
+            render = self.render,
+            nodisplace = self.nodisplace,
+            transparent = self.transparent,
+            greyscale = self.greyscale,
             optimizer=self.optimizer,
             lr = self.lr,
             latent_dim = self.latent_dim,
+            fmap_max = self.fmap_max,
+            ttur_mult = self.ttur_mult,
             attn_res_layers = self.attn_res_layers,
             freq_chan_attn = self.freq_chan_attn,
-            image_size = self.image_size,
-            render_size = self.render_size,
-            ttur_mult = self.ttur_mult,
-            fmap_max = self.fmap_max,
             disc_output_size = self.disc_output_size,
-            transparent = self.transparent,
-            greyscale = self.greyscale,
-            render = self.render,
-            nodisplace = self.nodisplace,
             rank = self.rank,
             *args,
             **kwargs
@@ -1213,7 +1197,7 @@ class Trainer():
         if self.render:
             # no need for pytorch3d if no rendering
             from rendering import Rendering
-            self.rendering = Rendering(image_size=self.render_size, point_radius=self.radius, gamma=self.gamma, num_points=self.num_points, mesh_obj_path=self.mesh_obj_path, smplx_model_path=self.smplx_model_path, rank=self.rank)
+            self.rendering = Rendering(image_size=self.render_size, num_points=self.num_points, gamma=self.gamma, point_radius=self.radius, mesh_obj_path=self.mesh_obj_path, smplx_model_path=self.smplx_model_path, rank=self.rank)
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank], 'output_device': self.rank, 'find_unused_parameters': True}
@@ -1225,44 +1209,55 @@ class Trainer():
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config()))
 
-    # TODO : complete this
     def load_config(self):
         config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
         self.image_size = config['image_size']
         self.render_size = config['render_size']
-        self.transparent = config['transparent']
-        self.syncbatchnorm = config['syncbatchnorm']
-        self.disc_output_size = config['disc_output_size']
-        self.greyscale = config.pop('greyscale', False)
         self.render = config.pop('render', False)
-        self.nodisplace = config.pop('dispacement', True)
+        self.renderer = config.pop('renderer', 'default')
+        self.nodisplace = config.pop('nodisplace', False)
+        self.num_points = config['num_points']
+        self.gamma = config['gamma']
+        self.radius = config['radius']
+        self.smoothing = config['smoothing']
+        self.transparent = config['transparent']
+        self.greyscale = config.pop('greyscale', False)
+        self.optimizer = config.pop('optimizer', 'adam')
+        self.latent_dim = config['latent_dim']
+        self.ttur_mult = config['ttur_mult']
         self.attn_res_layers = config.pop('attn_res_layers', [])
         self.freq_chan_attn = config.pop('freq_chan_attn', False)
-        self.optimizer = config.pop('optimizer', 'adam')
-        self.fmap_max = config.pop('fmap_max', 512)
+        self.disc_output_size = config['disc_output_size']
+        self.syncbatchnorm = config['syncbatchnorm']
         del self.GAN
         self.init_GAN()
 
-    # TODO : complete this
     def config(self):
         return {
             'image_size': self.image_size,
             'render_size': self.render_size,
+            'render': self.render,
+            'renderer': self.renderer,
+            'nodisplace': self.nodisplace,
+            'num_points': self.num_points,
+            'gamma': self.gamma,
+            'radius': self.radius,
+            'smoothing': self.smoothing,
             'transparent': self.transparent,
             'greyscale': self.greyscale,
-            'render': self.render,
-            'dispacement': not self.nodisplace,
-            'syncbatchnorm': self.syncbatchnorm,
-            'disc_output_size': self.disc_output_size,
             'optimizer': self.optimizer,
+            'latent_dim': self.latent_dim,
+            'ttur_mult': self.ttur_mult,
             'attn_res_layers': self.attn_res_layers,
-            'freq_chan_attn': self.freq_chan_attn
+            'freq_chan_attn': self.freq_chan_attn,
+            'disc_output_size': self.disc_output_size,
+            'syncbatchnorm': self.syncbatchnorm
         }
 
     def set_data_src(self, folder):
         num_workers = default(self.num_workers, math.ceil(NUM_CORES / self.world_size))
         resolution = self.render_size if self.render else self.image_size
-        self.dataset = ImageDataset(folder, resolution, transparent=self.transparent, greyscale=self.greyscale, aug_prob=self.dataset_aug_prob, render=self.render, rendermethod=self.rendermethod, labelpath=self.labelpath)
+        self.dataset = ImageDataset(folder, resolution, rendermethod=self.rendermethod, labelpath=self.labelpath, transparent=self.transparent, greyscale=self.greyscale, aug_prob=self.dataset_aug_prob)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = DataLoader(self.dataset, num_workers=num_workers, batch_size=math.ceil(self.batch_size / self.world_size), sampler=sampler, shuffle=not self.is_ddp, drop_last=True, pin_memory=True)
         self.loader = cycle(dataloader)

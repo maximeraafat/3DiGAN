@@ -23,32 +23,29 @@ from pytorch3d.renderer import (
 class Rendering():
     def __init__(
         self,
-        image_size = 128,
-        points_per_pixel = 10,
-        point_radius = 8e-4,
+        image_size = 256,
+        num_points = 10**5,
         gamma = 1e-3,
-        num_points = 10**6,
+        point_radius = 0.0005,
         mesh_obj_path = None,
         smplx_model_path = None,
         rank = 0
     ):
 
-        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
-
-        # rendering parameters
         self.image_size = image_size
-        self.points_per_pixel = points_per_pixel
-        self.point_radius = point_radius
         self.num_points = num_points
-
-        # specific pulsar parameters
-        self.gamma = gamma # gamma = 1.0 is mostly transparent : use values closer to 1 for geometry optimization
-        self.znear = 1.0
-        self.background = torch.ones((3,), device=self.device)
-
+        self.point_radius = point_radius
         self.mesh_obj_path = mesh_obj_path
         self.smplx_model_path = smplx_model_path
 
+        # pulsar specific parameters
+        self.gamma = gamma
+        self.znear = 1.0
+        self.background = torch.ones((3,), device=self.device)
+
+        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+
+        # extract mesh and smplx topology + uvs
         if mesh_obj_path:
             mesh_object = load_obj(mesh_obj_path, load_textures=False, device=self.device)
             self.obj_verts = self.normalize_verts( mesh_object[0].unsqueeze(0) )
@@ -57,7 +54,6 @@ class Rendering():
             obj_faces_uvs = mesh_object[1].textures_idx
             obj_verts_uvs = mesh_object[2].verts_uvs
             self.obj_uvs = obj_faces_uvs, obj_verts_uvs
-
         else:
             self.smplx_model = smplx.SMPLXLayer(smplx_model_path, gender='neutral').to(self.device)
             self.smplx_faces = self.smplx_model.faces_tensor.unsqueeze(0)
@@ -65,11 +61,12 @@ class Rendering():
             smplx_uv_path = os.path.join(smplx_model_path, 'smplx_uv.obj')
             self.smplx_uvs = self.get_smplx_uvs(smplx_uv_path)
 
+     # default rendering
     def point_renderer(self, cameras):
         raster_settings = PointsRasterizationSettings(
             image_size = self.image_size,
             radius = self.point_radius,
-            points_per_pixel = self.points_per_pixel
+            points_per_pixel = 50
         )
 
         rasterizer = PointsRasterizer(
@@ -80,15 +77,16 @@ class Rendering():
         renderer = PointsRenderer(
             rasterizer=rasterizer,
             compositor=AlphaCompositor(background_color=self.background)
-            ).to(self.device)
+            )
 
-        return renderer
+        return renderer.to(self.device)
 
+    # pulsar rendering
     def pulsar_renderer(self, cameras):
         raster_settings = PointsRasterizationSettings(
             image_size = self.image_size,
             radius = self.point_radius,
-            points_per_pixel = self.points_per_pixel
+            points_per_pixel = 10
         )
 
         rasterizer = PointsRasterizer(
@@ -96,9 +94,9 @@ class Rendering():
             raster_settings = raster_settings
         )
 
-        renderer = PulsarPointsRenderer(rasterizer=rasterizer).to(self.device)
+        renderer = PulsarPointsRenderer(rasterizer=rasterizer)
 
-        return renderer
+        return renderer.to(self.device)
 
     # normalize vertices by centering and scaling
     def normalize_verts(self, verts):
@@ -106,6 +104,7 @@ class Rendering():
         max = (verts - mean).square().sum(axis=2).sqrt().max() # largest variation from mean
         return (verts - mean) / max
 
+    # extract smplx uvs from obj file
     def get_smplx_uvs(self, smplx_uv_path):
         obj_mesh = load_obj(smplx_uv_path, load_textures=False, device=self.device)
         faces_uvs = obj_mesh[1].textures_idx
@@ -153,6 +152,7 @@ class Rendering():
 
         return Meshes(smplx_verts, self.smplx_faces.repeat(batch_size, 1, 1), texture)
 
+    # mesh from loaded obj file
     def get_obj_mesh(self, batch_size, texture=None):
         if texture is None:
             color = torch.ones_like(self.obj_verts, device=self.device)
@@ -174,9 +174,10 @@ class Rendering():
 
         return Pointclouds(points=xyz, features=txt[:,:,0:3])
 
-    # if mesh_obj_path : label = azimuth and elevation
-    # otherwise (smplx_model_path) : label = smplx parameters
+    # render textured pointcloud
     def render(self, texture, label, renderer='pulsar'):
+        # if mesh_obj_path : label = azimuth and elevation
+        # otherwise (smplx_model_path) : label = smplx parameters
         batch_size = texture.shape[0]
 
         # camera
@@ -194,7 +195,7 @@ class Rendering():
         mesh = self.get_smplx_mesh(label, texture) if self.smplx_model_path else self.get_obj_mesh(batch_size, texture)
         pointcloud = self.get_pointcloud(mesh)
 
-        # pulsar rendering
+        # point rendering
         gamma = (self.gamma,) * batch_size
         znear = (self.znear,) * batch_size
         zfar = (2 * dist,) * batch_size
