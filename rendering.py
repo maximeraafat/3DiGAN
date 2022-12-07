@@ -1,7 +1,6 @@
 import os
 import smplx
 import torch
-import numpy as np
 
 from pytorch3d.io import load_obj
 from pytorch3d.ops import sample_points_from_meshes
