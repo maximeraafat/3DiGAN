@@ -32,6 +32,8 @@ class Rendering():
         rank = 0
     ):
 
+        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
+
         self.image_size = image_size
         self.num_points = num_points
         self.point_radius = point_radius
@@ -42,8 +44,6 @@ class Rendering():
         self.gamma = gamma
         self.znear = 1.0
         self.background = torch.ones((3,), device=self.device)
-
-        self.device = torch.device('cuda:%d' % rank if torch.cuda.is_available() else 'cpu')
 
         # extract mesh and smplx topology + uvs
         if mesh_obj_path:

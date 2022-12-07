@@ -363,6 +363,39 @@ def resize_to_minimum_size(min_size, image):
         return torchvision.transforms.functional.resize(image, min_size)
     return image
 
+def renderlabels(rendermethod, folder=None, filepath=None):
+    if rendermethod is None: labels = None
+    # labels = camera azimuth and elevation
+    elif rendermethod == 'objmesh':
+        filepath = os.path.join(folder, 'dataset.json') if filepath is None else filepath
+        with open(filepath) as f:
+            labels = json.load(f)['labels']
+        if labels is None: return None
+        labels = dict(labels)
+        labels = list(labels.values()) # [labels[fname.parts[-1]] for fname in self.paths]
+        labels = torch.Tensor(labels).to(dtype=torch.float)
+
+    # labels = smplx parameters
+    else:
+        filepath = os.path.join(folder, 'dataset.npz') if filepath is None else filepath
+        parameters = np.load(filepath)
+
+        global_orient = torch.Tensor(parameters['global_orient'])
+        body_pose = torch.Tensor(parameters['body_pose'])
+        jaw_pose = torch.Tensor(parameters['jaw_pose'])
+        left_hand_pose = torch.Tensor(parameters['left_hand_pose'])
+        right_hand_pose = torch.Tensor(parameters['right_hand_pose'])
+        expression = torch.Tensor(parameters['expression'])
+        betas = torch.Tensor(parameters['betas'])
+        cam = torch.Tensor(parameters['cam'])
+
+        labels = global_orient, body_pose, jaw_pose, left_hand_pose, right_hand_pose, expression, betas, cam
+
+    return labels
+
+def labelindex(labels, idx, device='cpu', grad=False):
+        return tuple([ tensor[idx].to(device).requires_grad_(grad) for tensor in labels ])
+
 class ImageDataset(Dataset):
     def __init__(
         self,
@@ -380,7 +413,7 @@ class ImageDataset(Dataset):
         self.paths = sorted([p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')])
         assert len(self.paths) > 0, f'No images were found in {folder} for training'
 
-        self.labels = self.renderlabels(rendermethod, labelpath)
+        self.labels = renderlabels(rendermethod, folder, labelpath)
 
         if transparent:
             pillow_mode = 'RGBA'
@@ -402,40 +435,6 @@ class ImageDataset(Dataset):
             transforms.ToTensor(),
             transforms.Lambda(expand_fn)
         ])
-
-    def renderlabels(self, rendermethod=None, filepath=None):
-        if rendermethod is None: labels = None
-        # labels = camera azimuth and elevation
-        elif rendermethod == 'objmesh':
-            filepath = os.path.join(self.folder, 'dataset.json') if filepath is None else filepath
-            with open(filepath) as f:
-                labels = json.load(f)['labels']
-            if labels is None:
-                return None
-            labels = dict(labels)
-            labels = [labels[fname.parts[-1]] for fname in self.paths]
-            labels = torch.Tensor(labels).to(dtype=torch.float)
-
-        # labels = smplx parameters
-        else:
-            filepath = os.path.join(self.folder, 'dataset.npz') if filepath is None else filepath
-            parameters = np.load(filepath)
-
-            global_orient = torch.Tensor(parameters['global_orient'])
-            body_pose = torch.Tensor(parameters['body_pose'])
-            jaw_pose = torch.Tensor(parameters['jaw_pose'])
-            left_hand_pose = torch.Tensor(parameters['left_hand_pose'])
-            right_hand_pose = torch.Tensor(parameters['right_hand_pose'])
-            expression = torch.Tensor(parameters['expression'])
-            betas = torch.Tensor(parameters['betas'])
-            cam = torch.Tensor(parameters['cam'])
-
-            labels = global_orient, body_pose, jaw_pose, left_hand_pose, right_hand_pose, expression, betas, cam
-
-        return labels
-
-    def labelindex(self, idx, device='cpu', grad=False):
-        return tuple([ tensor[idx].to(device).requires_grad_(grad) for tensor in self.labels ])
 
     def __len__(self):
         return len(self.paths)
@@ -1213,20 +1212,20 @@ class Trainer():
         config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
         self.image_size = config['image_size']
         self.render_size = config['render_size']
-        self.render = config.pop('render', False)
-        self.renderer = config.pop('renderer', 'default')
-        self.nodisplace = config.pop('nodisplace', False)
+        self.render = config['render']
+        self.renderer = config['renderer']
+        self.nodisplace = config['nodisplace']
         self.num_points = config['num_points']
         self.gamma = config['gamma']
         self.radius = config['radius']
         self.smoothing = config['smoothing']
         self.transparent = config['transparent']
-        self.greyscale = config.pop('greyscale', False)
-        self.optimizer = config.pop('optimizer', 'adam')
+        self.greyscale = config['greyscale']
+        self.optimizer = config['optimizer']
         self.latent_dim = config['latent_dim']
         self.ttur_mult = config['ttur_mult']
-        self.attn_res_layers = config.pop('attn_res_layers', [])
-        self.freq_chan_attn = config.pop('freq_chan_attn', False)
+        self.attn_res_layers = config['attn_res_layers']
+        self.freq_chan_attn = config['freq_chan_attn']
         self.disc_output_size = config['disc_output_size']
         self.syncbatchnorm = config['syncbatchnorm']
         del self.GAN
@@ -1268,21 +1267,22 @@ class Trainer():
             self.aug_prob = min(0.5, (1e5 - num_samples) * 3e-6)
             print(f'autosetting augmentation probability to {round(self.aug_prob * 100)}%')
 
-    def sample_label(self, size):
-        if self.rendermethod == 'objmesh':
-            idx = np.random.choice(self.dataset.labels.shape[0], size, replace=True)
-            labels = self.dataset.labels[idx]
-        else:
-            idx = np.random.choice(self.dataset.labels[0].shape[0], size, replace=True)
-            labels = self.dataset.labelindex(idx, device=self.device, grad=True)
+    def sample_label(self, size, generate=False):
+        labels = renderlabels(self.rendermethod, filepath=self.labelpath) if generate else self.dataset.labels
 
-        return labels
+        if self.rendermethod == 'objmesh':
+            idx = np.random.choice(labels.shape[0], size, replace=True)
+            samples = labels[idx]
+        else:
+            idx = np.random.choice(labels[0].shape[0], size, replace=True)
+            samples = labelindex(labels, idx, device=self.device, grad=True)
+
+        return samples
 
     def train(self):
         assert exists(self.loader), 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
 
-        if not exists(self.GAN):
-            self.init_GAN()
+        if not exists(self.GAN): self.init_GAN()
 
         self.GAN.train()
         total_disc_loss = torch.zeros([], device=self.device)
@@ -1461,11 +1461,9 @@ class Trainer():
             return im
 
         latents = det_randn((num_rows ** 2, latent_dim)).to(self.device)
-        interpolate_latents = interpolate_between(latents[:num_rows], latents[-num_rows:],
-                                                  num_samples=num_rows,
-                                                  dim=0).flatten(end_dim=1)
-
+        interpolate_latents = interpolate_between(latents[:num_rows], latents[-num_rows:], num_samples=num_rows, dim=0).flatten(end_dim=1)
         generate_interpolations = self.generate_(self.GAN.G, interpolate_latents)
+
         if self.run is not None:
             grouped = generate_interpolations.view(num_rows, num_rows, *generate_interpolations.shape[1:])
             for idx, images in enumerate(grouped):
@@ -1475,110 +1473,86 @@ class Trainer():
                     img = image_to_pil(image)
                     aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
 
-                self.run.track(value=aim_images, name='generated',
-                               step=self.steps,
-                               context={'interpolated': True,
-                                        'alpha': alpha})
-        torchvision.utils.save_image(generate_interpolations, str(self.results_dir / self.name / f'{str(num)}-interp.{ext}'), nrow=num_rows)
+                self.run.track(value=aim_images, name='generated', step=self.steps, context={'interpolated': True, 'alpha': alpha})
+
+        savepath = os.path.join(self.results_dir, self.name, f'{str(num)}_interp.{ext}')
+        torchvision.utils.save_image(generate_interpolations, savepath, nrow=num_rows)
+
+        # aim and image saving options
+        def saveoptions(images, aimrun, rendering=False, ema=False):
+            if aimrun is not None:
+                aim_images = []
+                for idx, image in enumerate(images):
+                    img = image_to_pil(image)
+                    aimcaption = '#'  + str(idx) + ' Rendered' * rendering + ' EMA' * ema
+                    aim_images.append(self.aim.Image(img, caption=aimcaption))
+
+                aimname = 'rendered ' * rendering + 'generated'
+                self.run.track(value=aim_images, name=aimname, step=self.steps, context={'ema': ema})
+
+            ext = self.image_extension if not rendering else 'jpg'
+            filename = str(num) + '_rendered' * rendering + '_ema' * ema + f'.{ext}'
+            savepath = os.path.join(self.results_dir, self.name, filename)
+            torchvision.utils.save_image(images, savepath, nrow=num_rows)
 
         # regular
         generated_images = self.generate_(self.GAN.G, latents)
-
-        if self.run is not None:
-            aim_images = []
-            for idx, image in enumerate(generated_images):
-                img = image_to_pil(image)
-                aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
-
-            self.run.track(value=aim_images, name='generated',
-                           step=self.steps,
-                           context={'ema': False})
-        torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
+        saveoptions(generated_images, aimrun=self.run)
 
         # rendering regular
         if self.render:
             sampled_labels = self.sample_label(num_rows ** 2)
             rendered_images = self.rendering.render(generated_images, sampled_labels, self.renderer)
-
-            if self.run is not None:
-                aim_images = []
-                for idx, image in enumerate(rendered_images):
-                    img = image_to_pil(image)
-                    aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
-
-                self.run.track(value=aim_images, name='rendered_generated',
-                               step=self.steps,
-                               context={'ema': False})
-            torchvision.utils.save_image(rendered_images, str(self.results_dir / self.name / f'{str(num)}_rendered.jpg'), nrow=num_rows)
+            saveoptions(rendered_images, aimrun=self.run, rendering=True)
 
         # moving averages
         generated_images = self.generate_(self.GAN.GE, latents)
-        if self.run is not None:
-            aim_images = []
-            for idx, image in enumerate(generated_images):
-                img = image_to_pil(image)
-                aim_images.append(self.aim.Image(img, caption=f'EMA #{idx}'))
-
-            self.run.track(value=aim_images, name='generated',
-                           step=self.steps,
-                           context={'ema': True})
-        torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
+        saveoptions(generated_images, aimrun=self.run, ema=True)
 
         # rendering moving averages
         if self.render:
             sampled_labels = self.sample_label(num_rows ** 2)
             rendered_images = self.rendering.render(generated_images, sampled_labels, self.renderer)
-
-            if self.run is not None:
-                aim_images = []
-                for idx, image in enumerate(rendered_images):
-                    img = image_to_pil(image)
-                    aim_images.append(self.aim.Image(img, caption=f'#{idx}'))
-
-                self.run.track(value=aim_images, name='rendered_generated',
-                               step=self.steps,
-                               context={'ema': True})
-            torchvision.utils.save_image(rendered_images, str(self.results_dir / self.name / f'{str(num)}-ema_rendered.jpg'), nrow=num_rows)
+            saveoptions(rendered_images, aimrun=self.run, rendering=True, ema=True)
 
     @torch.no_grad()
     def generate(self, num=0, num_image_tiles=4, checkpoint=None, types=['default', 'ema']):
         self.GAN.eval()
 
-        latent_dim = self.GAN.latent_dim
-        dir_name = self.name + str('-generated-') + str(checkpoint)
+        latent_dim = self.latent_dim
+        dir_name = self.name + '_generated_' + str(checkpoint)
         dir_full = Path().absolute() / self.results_dir / dir_name
         ext = self.image_extension
 
-        if not dir_full.exists():
-            os.mkdir(dir_full)
+        if not dir_full.exists(): os.mkdir(dir_full)
 
         # regular
         if 'default' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated default images'):
                 latents = torch.randn(1, latent_dim, device=self.device)
                 generated_image = self.generate_(self.GAN.G, latents)
-                path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}.{ext}')
-                torchvision.utils.save_image(generated_image[0], path, nrow=1)
+                savepath = os.path.join(self.results_dir, dir_name, f'{str(num)}_{str(i)}.{ext}')
+                torchvision.utils.save_image(generated_image[0], savepath, nrow=1)
 
                 if self.render:
-                    sampled_labels = self.sample_label(1)
+                    sampled_labels = self.sample_label(1, generate=True)
                     rendered_image = self.rendering.render(generated_image, sampled_labels, self.renderer)
-                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}_rendered.jpg')
-                    torchvision.utils.save_image(rendered_image[0], path, nrow=1)
+                    savepath = os.path.join(self.results_dir, dir_name, f'{str(num)}_rendered{str(i)}.jpg')
+                    torchvision.utils.save_image(rendered_image[0], savepath, nrow=1)
 
         # moving averages
         if 'ema' in types:
             for i in tqdm(range(num_image_tiles), desc='Saving generated EMA images'):
                 latents = torch.randn(1, latent_dim, device=self.device)
                 generated_image = self.generate_(self.GAN.GE, latents)
-                path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema.{ext}')
-                torchvision.utils.save_image(generated_image[0], path, nrow=1)
+                savepath = os.path.join(self.results_dir, dir_name, f'{str(num)}_ema{str(i)}.{ext}')
+                torchvision.utils.save_image(generated_image[0], savepath, nrow=1)
 
                 if self.render:
-                    sampled_labels = self.sample_label(1)
+                    sampled_labels = self.sample_label(1, generate=True)
                     rendered_image = self.rendering.render(generated_image, sampled_labels, self.renderer)
-                    path = str(self.results_dir / dir_name / f'{str(num)}-{str(i)}-ema_rendered.jpg')
-                    torchvision.utils.save_image(rendered_image[0], path, nrow=1)
+                    savepath = os.path.join(self.results_dir, dir_name, f'{str(num)}_rendered_ema{str(i)}.jpg')
+                    torchvision.utils.save_image(rendered_image[0], savepath, nrow=1)
 
         return dir_full
 
@@ -1587,34 +1561,32 @@ class Trainer():
         checkpoints = self.get_checkpoints()
         assert exists(checkpoints), 'cannot find any checkpoints to create a training progress video for'
 
-        dir_name = self.name + str('-progress')
+        dir_name = self.name + '_progress'
         dir_full = Path().absolute() / self.results_dir / dir_name
         ext = self.image_extension
         latents = None
 
         zfill_length = math.ceil(math.log10(len(checkpoints)))
 
-        if not dir_full.exists():
-            os.mkdir(dir_full)
+        if not dir_full.exists(): os.mkdir(dir_full)
 
         for checkpoint in tqdm(checkpoints, desc='Generating progress images'):
             self.load(checkpoint, print_version=False)
             self.GAN.eval()
 
-            if checkpoint == 0:
-                latents = torch.randn(num_images, self.GAN.latent_dim, device=self.device)
+            if checkpoint == 0: latents = torch.randn(num_images, self.latent_dim, device=self.device)
 
             # regular
             if 'default' in types:
                 generated_image = self.generate_(self.GAN.G, latents)
-                path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}.{ext}')
-                torchvision.utils.save_image(generated_image, path, nrow=num_images)
+                savepath = os.path.join(self.results_dir, dir_name, f'{str(checkpoint).zfill(zfill_length)}.{ext}')
+                torchvision.utils.save_image(generated_image, savepath, nrow=num_images)
 
             # moving averages
             if 'ema' in types:
                 generated_image = self.generate_(self.GAN.GE, latents)
-                path = str(self.results_dir / dir_name / f'{str(checkpoint).zfill(zfill_length)}-ema.{ext}')
-                torchvision.utils.save_image(generated_image, path, nrow=num_images)
+                savepath = os.path.join(self.results_dir, dir_name, f'{str(checkpoint).zfill(zfill_length)}_ema.{ext}')
+                torchvision.utils.save_image(generated_image, savepath, nrow=num_images)
 
     @torch.no_grad()
     def calculate_fid(self, num_batches):
@@ -1633,7 +1605,8 @@ class Trainer():
                 real_batch = next(self.loader).to(self.device)
                 for k, image in enumerate(real_batch.unbind(0)):
                     ind = k + batch_num * self.batch_size
-                    torchvision.utils.save_image(image, real_path / f'{ind}.png')
+                    savepath = os.path.join(real_path, f'{ind}.png')
+                    torchvision.utils.save_image(image, savepath)
 
         ## generate a bunch of fake images in results / name / fid_fake
 
@@ -1658,7 +1631,8 @@ class Trainer():
 
             for j, image in enumerate(generated_images.unbind(0)):
                 ind = j + batch_num * self.batch_size
-                torchvision.utils.save_image(image, str(fake_path / f'{str(ind)}-ema.{ext}'))
+                savepath = os.path.join(fake_path, f'{str(ind)}_ema.{ext}')
+                torchvision.utils.save_image(image, savepath)
 
         return fid_score.calculate_fid_given_paths([str(real_path), str(fake_path)], 256, latents.device, 2048)
 
@@ -1694,13 +1668,14 @@ class Trainer():
 
             frames.append(pil_image)
 
-        frames[0].save(str(self.results_dir / self.name / f'{str(num)}.gif'), save_all=True, append_images=frames[1:], duration=80, loop=0, optimize=True)
+        savepath = os.path.join(self.results_dir, self.name, f'{str(num)}.gif')
+        frames[0].save(savepath, save_all=True, append_images=frames[1:], duration=80, loop=0, optimize=True)
 
         if save_frames:
             folder_path = (self.results_dir / self.name / f'{str(num)}')
             folder_path.mkdir(parents=True, exist_ok=True)
             for ind, frame in enumerate(frames):
-                frame.save(str(folder_path / f'{str(ind)}.{ext}'))
+                frame.save( os.path.join(folder_path, f'{str(ind)}.{ext}') )
 
     def print_log(self):
         data = [
@@ -1722,7 +1697,7 @@ class Trainer():
         return data
 
     def model_name(self, num):
-        return str(self.models_dir / self.name / f'model_{num}.pt')
+        return os.path.join(self.models_dir, self.name, f'model_{num}.pt')
 
     def init_folders(self):
         (self.results_dir / self.name).mkdir(parents=True, exist_ok=True)

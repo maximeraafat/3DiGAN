@@ -18,3 +18,12 @@ TODO
 * Test generate and generate_interpolation with and without displacements + show_progress and calculate_fid functions
 
 * TODO : split fourth displacement channel from RGB channels when saving textures
+
+Calculate FID is done in rendering space if flag is called
+Show progress and generate interpolation do no support rendering
+For now, UV RGBD textures are stored as 4 channel png images
+
+## Training Setting
+### Training Options
+
+## Generation
