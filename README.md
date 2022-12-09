@@ -88,6 +88,9 @@ The `--mesh_obj_path` option requires a **json** file contaning estimated or gro
 1. renaming the **json** file to `dataset.json` and including it into the dataset folder under `<path/to/dataset>`, or by
 2. providing the path to the **json** file with `--labelpath <path/to/json>`
 
+An example dataset of renders of the PyTorch3D cow mesh with corresponding **json** file containing camera poses labels is accessible [here](https://drive.google.com/file/d/1RxPwHNNr-7jyG7gU4ulzPAyNR1vcKAnD/view?usp=share_link), and the cow **obj** file is accessible [under this link](https://dl.fbaipublicfiles.com/pytorch3d/data/cow_mesh/cow.obj).
+
+
 ## Generation
 
 To synthesise new human appearances from a trained generator, execute this command.
@@ -108,23 +111,22 @@ Unlike for training, generation requires the `--labelpath` option since the data
 
 This section discusses the relevant command line arguments. The code follows a similar structure to the original [lightweight GAN](https://github.com/lucidrains/lightweight-gan) implementation and supports the same options, while adding arguments for the rendering environment. Please visit the parent repository for further details.
 
-* `--render_size` : set by default to `256`, defines the square rendering resolution. This option does not replace `--image_size` (also by default set to `256`), which is the square UV map resolution.
-* `--render` : whether to render the learned generated output. Without this flag, the code is essentially a copy of [lightweight GAN](https://github.com/lucidrains/lightweight-gan).
+* `--render_size` : square rendering resolution, by default set to `256`. This flag does not replace `--image_size` (also by default set to `256`), which is the generated square UV map resolution.
+* `--render` : whether to render the learned generated output. Without this flag, the code is essentially a copy of lightweight GAN.
 * `--renderer` : set by default to `default`, defines which point renderer to use. Has to be one of of `default or `pulsar`.
 * `--nodisplace` : call this flag to learn RGB appearances without a fourth displacement channel.
-* `--num_points` : by default set to `10**5`, the number of points sampled from the underlying mesh geometry, for point rendering.
-* `--gamma` : set by default to `1e-3`, the point transparency coefficient for pulsar (defined between 1e-5 and 1).
-* `--radius` : set by default to `0.01` for the default renderer, and to `0.0005` for pulsar.
+* `--num_points` : number of points sampled from the underlying mesh geometry, by default set to `10**5`.
+* `--gamma` : point transparency coefficient for pulsar (defined between 1e-5 and 1), by default set to `1e-3`.
+* `--radius` : point radius, set by default to `0.01` for the default renderer and to `0.0005` for pulsar.
 * `--smplx_model_path` : path to the SMPLX models folder.
 * `--mesh_obj_path` : path to the underlying **obj** mesh file.
-* `--labelpath` : path to the **npz**, respectively **json** json file containing smplx parameters or camera pose necessary for rendering.
+* `--labelpath` : path to the **npz**, respectively **json** json file containing smplx parameters or camera poses necessary for rendering.
 
-Note that the generated UV textures are currently concatenated into 4 channel RGBD images rather than RGB images plus a separate displacement texture map. The `--displacement` and `--greyscale` options are not support when calling the `--render` flag.
+Note that the generated UV textures are currently concatenated into 4 channel RGBD images rather than RGB images, plus a separate displacement texture map. The `--displacement` and `--greyscale` options are not support when calling the `--render` flag.
 
-Additionally, the `--show_progress` and `--generate_interpolation` flags from the original parent implementation are still supported, but operate in the UV space rather than in the render space.
+The `--show_progress` and `--generate_interpolation` flags from the original parent implementation are supported, but operate in the UV space rather than in the render space.
 
 
 ## Upcoming
 - [ ] Instructions for extracting SMPLX parameters with PIXIE on SHHQ.
 - [ ] Release **npz** file containing SMPLX parameters for SHHQ subjects, estimated with PIXIE.
-- [ ] Publish cow dataset and respective **json** file
