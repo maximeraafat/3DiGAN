@@ -1,0 +1,12 @@
+numpy
+torch
+torchvision
+smplx
+tqdm
+pillow
+fire
+retry
+einops
+kornia
+adabelief_pytorch
+pytorch_fid
