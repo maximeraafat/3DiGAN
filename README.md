@@ -2,7 +2,7 @@
 
 Code for **3D** aware **i**mplicit **G**enerative **A**dversial **N**etwork.
 
-This repository extends a [lightweight](https://github.com/lucidrains/lightweight-gan) generative adversial network (GAN) to generate 2D image UV textures on top of an underlying geometry. Given a mesh prior, the generator synthesises UV appearance textures which are then rendered on top of the geometry. Colored points are sampled from the mesh and displaced along the mesh normal according to the last UV texture channel, which operates as a displacement map.
+This repository extends a [lightweight generative network](https://github.com/lucidrains/lightweight-gan) to learn a distribution of 2D image UV textures wrapped on an underlying geometry. Given a mesh prior, the generator synthesises UV appearance textures which are then rendered on top of the geometry. Colored points are sampled from the mesh and displaced along the mesh normal according to the last UV texture channel, which operates as a displacement map.
 
 As stated above, this code builds on top of an implementation by GitHub user [lucidrains](https://github.com/lucidrains). The mentioned code license is provided in the below toggle.
 
@@ -43,13 +43,13 @@ git clone https://github.com/maximeraafat/3DiGAN.git
 pip install -r 3DiGAN/requirements.txt
 ```
 
-The point-based rendering framework utilises [PyTorch3D](https://pytorch3d.org). Checkout the steps described in their provided [installation instruction set](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md) for matching versions of **PyTorch** and **CUDA**.
+The point-based rendering framework utilises [PyTorch3D](https://pytorch3d.org). Checkout the steps described in their provided [installation instruction set](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md) with matching versions of **PyTorch**, and **CUDA** if applicable.
 
 Learning a human appearance model requires an underlying geometry prior : **3DiGAN** leverages the SMPLX parametric body model. Download the body model `SMPLX_NEUTRAL.npz` and corresponding UVs `smplx_uv.obj` from the [SMPLX project page](https://smpl-x.is.tue.mpg.de) into a shared folder. Instead of storing SMPLX meshes individually, we store SMPLX parameters into a **npz** file. Checkout our according README on how to capture SMPLX parameters for a dataset of single-view full body human images using [PIXIE](https://github.com/YadiraF/PIXIE).
 
 ## Training
 
-**3DiGAN** is suited for appearance learning and synthesis; we discuss two different scenarios.
+Our code's purpose is the learning and synthesis of novel appearances; here we provide instructions for two different scenarios.
 
 ### Human Appearance
 
@@ -59,10 +59,10 @@ Given a large dataset of full body humans (see [SHHQ](https://github.com/stylega
 python 3DiGAN/main.py --data <path/to/dataset> --models_dir <path/to/output/models> --results_dir <path/to/output/results> --name <run/name> --render --smplx_model_path <path/to/smplx>
 ```
 
-The `--smplx_model_path` option provides the path to the SMPLX models folder, and requires an **npz** file contaning all the estimated SMPLX parameters for each image in the dataset. See the [installations](#installations) section for details. The **npz** file must be accessible in one of two ways
+The `--smplx_model_path` option provides the path to the SMPLX models folder, and requires an **npz** file containing all the estimated SMPLX parameters for each image in the dataset. See the [installations](#installations) section for details. The **npz** file must be accessible either by
 
-1. Rename the **npz** file to `dataset.npz` and include it into the dataset folder under `<path/to/dataset>`
-2. Provide the path to the **npz** file with the `--labelpath <path/to/npz>` option
+1. renaming the **npz** file to `dataset.npz` and including it into the dataset folder under `<path/to/dataset>`, or by
+2. providing the path to the **npz** file with `--labelpath <path/to/npz>`
 
 ### Arbitrary Geometry Appearance
 
@@ -72,9 +72,19 @@ To synthesise appearance for an arbitrary fixed geometry prior, provide the path
 python 3DiGAN/main.py --data <path/to/dataset> --models_dir <path/to/output/models> --results_dir <path/to/output/results> --name <run/name> --render --mesh_obj_path <path/to/obj>
 ```
 
-The `--mesh_obj_path` option requires a **json** file contaning estimated or ground truth camera azimuth and elevations for each image in the dataset. An example is provided HERE.
+The `--mesh_obj_path` option requires a **json** file contaning estimated or ground truth camera azimuth and elevations for each image in the dataset. Note that the focal length to our point rendering camera is fixed to 10. Analogously to the human apperance modelling section, the **json** file must be accessible either by
+
+1. renaming the **json** file to `dataset.json` and including it into the dataset folder under `<path/to/dataset>`, or by
+2. providing the path to the **json** file with `--labelpath <path/to/json>`
 
 ## Generation
+
+To synthesize new images from a trained generator execute this command.
+
+```bash
+python 3DiGAN/main.py --generate --models_dir <path/to/output/models> --results_dir <path/to/output/results> --name <run/name> --render --labelpath <path/to/npz> --smplx_model_path <path/to/smplx>
+```
+
 
 ## Settings
 
@@ -89,6 +99,8 @@ The `--mesh_obj_path` option requires a **json** file contaning estimated or gro
 * Calculate FID is done in rendering space if flag is called
 
 * Show progress and generate interpolation do no support rendering
+
+* REQUIRE SQUARE IMAGES AND SQUARE RENDERS
 
 ## TODO 
 - [ ] README for extracting SMPLX parameters with PIXIE.
