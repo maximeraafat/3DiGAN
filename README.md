@@ -37,6 +37,8 @@ SOFTWARE.
 
 ## Installations
 
+### Module dependencies
+
 Clone this repository and install the dependencies with the below commands.
 ```bash
 git clone https://github.com/maximeraafat/3DiGAN.git
@@ -45,7 +47,33 @@ pip install -r 3DiGAN/requirements.txt
 
 The point-based rendering framework utilises [PyTorch3D](https://pytorch3d.org). Checkout the steps described in their provided [installation instruction set](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md) with matching versions of **PyTorch**, and **CUDA** if applicable.
 
-Learning a human appearance model requires an underlying geometry prior : **3DiGAN** leverages the SMPLX parametric body model. Download the body model `SMPLX_NEUTRAL.npz` and corresponding UVs `smplx_uv.obj` from the [SMPLX project page](https://smpl-x.is.tue.mpg.de) into a shared folder. Instead of storing SMPLX meshes individually, we store SMPLX parameters into a **npz** file. The instructins on how to capture SMPLX parameters for a dataset of single-view full body human images using [PIXIE](https://github.com/YadiraF/PIXIE) will be made available.
+### SMPLX
+Learning a human appearance model requires an underlying geometry prior : **3DiGAN** leverages the SMPLX parametric body model. Download the body model `SMPLX_NEUTRAL.npz` and corresponding UVs `smplx_uv.obj` from the [SMPLX project page](https://smpl-x.is.tue.mpg.de) into a shared folder. Instead of storing SMPLX meshes individually, we store SMPLX parameters into a **npz** file. **3DiGAN** requires a specific structure for SMPLX, which we extract from [PIXIE](https://github.com/YadiraF/PIXIE)'s estimated body parameters output.
+
+<details>
+<summary> Details on how to get SMPLX parameters for <b>3DiGAN</b> with PIXIE  </summary>
+
+Our code expects a **npz** file containing a list of 8 tensors : `['global_orient', 'body_pose', 'jaw_pose', 'left_hand_pose', 'right_hand_pose', 'expression', 'betas', 'cam']`. All parameters per subject are obtained from PIXIE's output in the following way.
+
+```python
+import numpy as np
+
+
+params = np.load(<name>_param.pkl, allow_pickle=True)
+prediction = np.load(<name>_prediction.pkl, allow_pickle=True)
+
+global_orient = params['global_pose']
+body_pose = params['body_pose']
+jaw_pose = params['jaw_pose']
+left_hand_pose = params['left_hand_pose']
+right_hand_pose = params['right_hand_pose']
+expression = params['exp'][:10]
+betas = params['shape'][:10]
+cam = prediction['cam']
+```
+
+Finally, the SMPLX parameters are concatenated together for all subjects in the dataset. For instance, the final global orientation shape will be `global_orient.shape = (num_subjects, 1, 3, 3)`, where the same shape for a single SMPLX subject is `(1, 3, 3)`. An example of SMPLX parameters for the version 1.0 of the SHHQ dataset, containing 40'000 images of high-quality full-body humans, is accessible [here](https://drive.google.com/file/d/1SoPnvbPv4oxuLJw3yP8J4-fnHuyRqTnj/view?usp=share_link).
+</details>
 
 
 ## Training
