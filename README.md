@@ -156,4 +156,4 @@ Both the `--show_progress` and `--generate_interpolation` flags from the origina
 
 ## Remarks
 
-This code is my Master Thesis repository. Although fully operational, the generator does not converge due to many instabilities encountered during the fragile GAN training. Keep in mind that this implementation accordingly serves primarily as a basis for future research, rather than for direct usage. Further details to my work can be found on [my personal website](https://maximeraafat.github.io/projects/master_thesis).
+This code is my Master Thesis repository. Although fully operational, the generator does not converge due to many instabilities encountered during the fragile GAN training, especially when learning a fourth displacement UV channel. Keep in mind that this implementation accordingly serves primarily as a basis for future research, rather than for direct usage. Further details on my work and the failure cases are accessible on [my personal website](https://maximeraafat.github.io/projects/master_thesis).
