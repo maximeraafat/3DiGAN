@@ -1,6 +1,6 @@
 # 3DiGAN
 
-> Code for **3D** aware **i**mplicit **G**enerative **A**dversial **N**etwork. Please mind the [remarks](#remarks) if you intend to make use of this code.
+> Code for **3D** aware **i**mplicit **G**enerative **A**dversarial **N**etwork. Please mind the [remarks](#remarks) if you intend to make use of this code.
 
 This repository extends a [lightweight generative network](https://github.com/lucidrains/lightweight-gan) to learn a distribution of 2D image UV textures wrapped on an underlying geometry, from a dataset of single-view photographs. Given a mesh prior, the generator synthesises UV appearance textures which are then rendered on top of the geometry. Colored points are sampled from the mesh and displaced along the mesh normal according to the last UV texture channel, which operates as a displacement map.
 
